@@ -20,3 +20,6 @@ _executed.ipynb
 *.set
 *.fdt
 *.mat
+
+# Built data release
+dist/

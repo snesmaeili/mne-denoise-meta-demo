@@ -1,0 +1,17 @@
+# Environment for Binder / Colab / a fresh checkout.
+#
+# mne-denoise is pinned to the exact commit the talk was measured against, so
+# the notebook reproduces the numbers shown at the sprint rather than whatever
+# main happens to be.
+
+mne-denoise @ git+https://github.com/mne-tools/mne-denoise.git@f5b821cc2a535e84ed46085d45ea5a356dd8d548
+
+mne==1.12.1
+numpy==2.4.6
+scipy==1.17.1
+scikit-learn>=1.1
+matplotlib>=3.5
+
+# Notebook runtime (Binder needs these explicitly; Colab already has them).
+jupyterlab>=4.0
+ipykernel>=6.0

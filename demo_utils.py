@@ -423,7 +423,8 @@ ASSETS: tuple[DemoAsset, ...] = (
     DemoAsset(
         "dss",
         "DSS target enhancement",
-        ("dss_demo-epo.fif", "dss_metrics.json", "dss_group.json", "dss_manifest.json"),
+        ("dss_demo-epo.fif", "dss_sources.npz", "dss_metrics.json", "dss_group.json",
+         "dss_manifest.json"),
     ),
     DemoAsset(
         "movement",

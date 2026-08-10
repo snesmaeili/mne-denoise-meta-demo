@@ -1,5 +1,31 @@
 # Meta sprint demo — mne-denoise
 
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/snesmaeili/mne-denoise-meta-demo/blob/main/meta_mne_denoise_demo.ipynb)
+[![Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/snesmaeili/mne-denoise-meta-demo/main?labpath=meta_mne_denoise_demo.ipynb)
+[![License: BSD-3](https://img.shields.io/badge/code-BSD--3--Clause-blue.svg)](LICENSE)
+[![Data: CC BY-SA 4.0](https://img.shields.io/badge/data-CC%20BY--SA%204.0-lightgrey.svg)](NOTICE.md)
+
+**There is no universally correct M/EEG denoiser.** Line noise, transient
+movement, reference-correlated artifacts and "enhance the response I care
+about" are different problems that need different information.
+[`mne-denoise`](https://github.com/mne-tools/mne-denoise) implements each as an
+MNE-native estimator — and leaves a fitted state you can interrogate to check
+what it actually did.
+
+This repository is that argument, in five minutes and four measurements.
+
+## Run it yourself
+
+Click **Open in Colab** above. The first cell pins `mne-denoise` to the exact
+commit the numbers were measured against and downloads a 20 MB bundle of
+prepared assets — no OpenNeuro download, no multi-gigabyte wait. The whole
+notebook then executes in about ten seconds.
+
+Everything you see was computed by the software. Nothing is a screenshot, and
+nothing is transcribed from a manuscript.
+
+---
+
 A five-minute live demo for the MNE-Python maintainers sprint. Four acts, four
 artifact families, four information regimes, one estimator contract.
 
