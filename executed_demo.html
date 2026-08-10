@@ -207,22 +207,39 @@
 <section class="cell">
 <div class="cell-head"><span class="marker">In [1]</span></div>
 <pre class="code"><code><span class="c"># Colab / fresh-environment bootstrap. Does nothing on a prepared machine.</span>
-<span class="k">import</span> sys, subprocess
+<span class="k">import</span> os, sys, subprocess
 <span class="k">from</span> pathlib <span class="k">import</span> Path
 
 IN_COLAB = <span <span class="k">class</span>="s">&quot;google.colab&quot;</span> <span class="k">in</span> sys.modules
+DEMO_REPO = <span <span class="k">class</span>="s">&quot;https://github.com/snesmaeili/mne-denoise-meta-demo.git&quot;</span>
 MNE_DENOISE_PIN = <span <span class="k">class</span>="s">&quot;f5b821cc2a535e84ed46085d45ea5a356dd8d548&quot;</span>
+MNE_DENOISE_SPEC = (
+    f<span <span class="k">class</span>="s">&quot;mne-denoise @ git+https://github.com/mne-tools/mne-denoise.git@{MNE_DENOISE_PIN}&quot;</span>
+)
+
+<span class="k">def</span> _pip(spec):
+    <span class="c"># subprocess, not %pip: line magics do not interpolate {braces}, so an</span>
+    <span class="c"># f-string here is the only way the pin actually reaches pip.</span>
+    subprocess.run([sys.executable, <span <span class="k">class</span>="s">&quot;-m&quot;</span>, <span <span class="k">class</span>="s">&quot;pip&quot;</span>, <span <span class="k">class</span>="s">&quot;install&quot;</span>, <span <span class="k">class</span>="s">&quot;-q&quot;</span>, spec], check=<span class="k">True</span>)
 
 <span class="k">if</span> IN_COLAB <span class="k">and</span> <span class="k">not</span> Path(<span <span class="k">class</span>="s">&quot;demo_utils.py&quot;</span>).exists():
-    subprocess.run([<span <span class="k">class</span>="s">&quot;git&quot;</span>, <span <span class="k">class</span>="s">&quot;clone&quot;</span>, <span <span class="k">class</span>="s">&quot;-q&quot;</span>, <span <span class="k">class</span>="s">&quot;--depth&quot;</span>, <span <span class="k">class</span>="s">&quot;<span <span class="k">class</span>="n">1</span>&quot;</span>,
-                    <span <span class="k">class</span>="s">&quot;https://github.com/snesmaeili/mne-denoise-meta-demo.git&quot;</span>], check=<span class="k">True</span>)
-    %cd mne-denoise-meta-demo
-    %pip install -q <span <span class="k">class</span>="s">&quot;mne-denoise @ git+https://github.com/mne-tools/mne-denoise.git@{MNE_DENOISE_PIN}&quot;</span>
+    done = subprocess.run([<span <span class="k">class</span>="s">&quot;git&quot;</span>, <span <span class="k">class</span>="s">&quot;clone&quot;</span>, <span <span class="k">class</span>="s">&quot;-q&quot;</span>, <span <span class="k">class</span>="s">&quot;--depth&quot;</span>, <span <span class="k">class</span>="s">&quot;<span <span class="k">class</span>="n">1</span>&quot;</span>, DEMO_REPO],
+                          capture_output=<span class="k">True</span>, text=<span class="k">True</span>)
+    <span class="k">if</span> done.returncode != <span <span class="k">class</span>="n">0</span>:
+        <span class="k">print</span>(<span <span class="k">class</span>="s">&quot;Could <span class="k">not</span> clone the demo repository.&quot;</span>)
+        <span class="k">print</span>(<span <span class="k">class</span>="s">&quot;git said:&quot;</span>, (done.stderr <span class="k">or</span> <span <span class="k">class</span>="s">&quot;&quot;</span>).strip() <span class="k">or</span> done.returncode)
+        raise SystemExit(
+            <span <span class="k">class</span>="s">&quot;If the repository is still private, the Colab VM has no credentials &quot;</span>
+            <span <span class="k">class</span>="s">&quot;<span class="k">for</span> it -- authorising Colab lets it OPEN a notebook, <span class="k">not</span> clone the &quot;</span>
+            <span <span class="k">class</span>="s">&quot;repo. Make the repository public, <span class="k">or</span> run this notebook locally.&quot;</span>
+        )
+    os.chdir(<span <span class="k">class</span>="s">&quot;mne-denoise-meta-demo&quot;</span>)
+    sys.path.insert(<span <span class="k">class</span>="n">0</span>, os.getcwd())
 
 try:
     <span class="k">import</span> mne_denoise  <span class="c"># noqa: F401</span>
 except ImportError:
-    %pip install -q <span <span class="k">class</span>="s">&quot;mne-denoise @ git+https://github.com/mne-tools/mne-denoise.git@{MNE_DENOISE_PIN}&quot;</span>
+    _pip(MNE_DENOISE_SPEC)
 
 <span class="c"># Pull the prepared assets only if the cache is incomplete. The existence check</span>
 <span class="c"># is deliberately cheap so a prepared machine pays nothing here.</span>
