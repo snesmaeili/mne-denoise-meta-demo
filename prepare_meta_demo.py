@@ -753,18 +753,157 @@ def _baseline_snr(epochs) -> float:
     return float(gfp[post].mean() / gfp[pre].mean())
 
 
+#: Seed and amplitudes for the bias-swap fixture. These match
+#: ``deep_dives/04_dss.ipynb`` cell 4 exactly so the talk and the deep dive
+#: describe the same data. Declared before any result was inspected: the
+#: distractor rhythm is deliberately the STRONGER source.
+FIXTURE_SEED = 97
+FIXTURE_EVOKED_AMP = 1.1
+FIXTURE_ALPHA_AMP = 1.4
+
+
+def _bias_swap_fixture():
+    """Two planted sources: a phase-locked evoked deflection and a stronger alpha."""
+    rng = np.random.default_rng(FIXTURE_SEED)
+    n_ep, n_ch, n_t, sfreq = 120, 32, 256, 256.0
+    times = np.arange(n_t) / sfreq - 0.2
+    evoked = -np.exp(-((times - 0.15) ** 2) / 0.002)
+    v_evoked = rng.standard_normal(n_ch); v_evoked /= np.linalg.norm(v_evoked)
+    v_alpha = rng.standard_normal(n_ch); v_alpha /= np.linalg.norm(v_alpha)
+    data = rng.standard_normal((n_ep, n_ch, n_t)) * 0.7
+    for e in range(n_ep):
+        data[e] += np.outer(v_evoked, evoked) * FIXTURE_EVOKED_AMP
+        data[e] += np.outer(v_alpha, np.sin(
+            2 * np.pi * 10 * times + rng.uniform(0, 6.28))) * FIXTURE_ALPHA_AMP
+    return data, v_evoked, v_alpha, sfreq
+
+
+def _bias_swap_measurement():
+    """Same estimator, same data, three criteria -- what does component 1 find?
+
+    PCA is included as a measurement rather than an assertion: the alpha carries
+    more variance, so variance-maximisation should return it.
+    """
+    import mne
+
+    from mne_denoise.dss import DSS, AverageBias, BandpassBias
+
+    data, v_evoked, v_alpha, sfreq = _bias_swap_fixture()
+    # Fit the MNE object, not the raw array: deep_dives/04_dss.ipynb does the
+    # same, and the two paths differ in the third decimal. Identical inputs keep
+    # the talk and the deep dive quoting identical numbers.
+    epochs = mne.EpochsArray(
+        data, mne.create_info(data.shape[1], sfreq, "eeg"), tmin=-0.2,
+        verbose="ERROR")
+
+    def _score(pattern):
+        p = pattern / np.linalg.norm(pattern)
+        return {"evoked": float(abs(p @ v_evoked)), "alpha": float(abs(p @ v_alpha))}
+
+    out = {}
+    for label, bias in (
+        ("AverageBias", AverageBias(axis="epochs")),
+        ("BandpassBias", BandpassBias(freq_band=(8.0, 12.0), sfreq=sfreq)),
+    ):
+        dss = DSS(bias=bias, n_components=4)
+        dss.fit(epochs)
+        out[label] = _score(dss.patterns_[:, 0])
+
+    flat = data.transpose(1, 0, 2).reshape(data.shape[1], -1)
+    u, s, _ = np.linalg.svd(flat - flat.mean(axis=1, keepdims=True),
+                            full_matrices=False)
+    out["PCA"] = _score(u[:, 0])
+    out["_explained_variance_ratio"] = (s[:3] ** 2 / np.sum(s ** 2)).tolist()
+    out["_amplitudes"] = {"evoked": FIXTURE_EVOKED_AMP, "alpha": FIXTURE_ALPHA_AMP}
+    return out
+
+
+def _ica_equivalence():
+    """Does IterativeDSS with a tanh contrast land where FastICA lands?
+
+    The package claims equivalence (``nonlinear.py:646-653``). This measures it
+    instead of repeating it, and reports FastICA's own recovery in the same
+    table so the gap is visible rather than rounded away.
+    """
+    from scipy import stats
+    from sklearn.decomposition import FastICA
+
+    from mne_denoise.dss import IterativeDSS, TanhMaskDenoiser, beta_tanh
+
+    rng = np.random.default_rng(FIXTURE_SEED)
+    n = 4000
+    t = np.linspace(0, 8, n)
+    sources = np.vstack([
+        stats.laplace.rvs(size=n, random_state=1),   # super-Gaussian, sparse
+        np.sign(np.sin(3 * t)),                      # square wave, high kurtosis
+        np.sin(10 * t),                              # sub-Gaussian
+        rng.standard_normal(n),                      # Gaussian
+    ])
+    sources /= sources.std(axis=1, keepdims=True)
+    mixed = rng.standard_normal((8, 4)) @ sources
+
+    dss_src = IterativeDSS(TanhMaskDenoiser(), n_components=4,
+                           beta=beta_tanh, random_state=0).fit_transform(mixed)
+    ica_src = FastICA(n_components=4, fun="logcosh", random_state=0,
+                      max_iter=1000, whiten="unit-variance").fit_transform(mixed.T).T
+
+    def _recovery(rec):
+        c = np.abs(np.corrcoef(rec, sources)[: rec.shape[0], rec.shape[0]:])
+        return c.max(axis=0).tolist()
+
+    pair = np.abs(np.corrcoef(dss_src, ica_src)[:4, 4:]).max(axis=1)
+    return {
+        "source_labels": ["laplace", "square", "sinusoid", "gaussian"],
+        "iterative_dss_recovery": _recovery(dss_src),
+        "fastica_recovery": _recovery(ica_src),
+        "matched_pair_r": pair.tolist(),
+    }
+
+
+def _subspace_overlap(a, b):
+    """Cosines of the principal angles between two column spaces (1.0 = same)."""
+    qa, _ = np.linalg.qr(a)
+    qb, _ = np.linalg.qr(b)
+    return np.clip(np.linalg.svd(qa.T @ qb, compute_uv=False), 0.0, 1.0)
+
+
+def _xdawn_projector(fit_data, k):
+    """Rank-``k`` Xdawn back-projection matrix, or None if the fit fails.
+
+    A single class is used because ``AverageBias`` also ignores condition. Rows
+    of ``filters_`` and ``patterns_`` are components, so the mixing matrix is
+    ``patterns_.T`` -- confirmed by checking ``patterns_.T @ filters_ == I`` at
+    full rank. Regularisation is fixed at ``ledoit_wolf`` and deliberately NOT
+    tuned, so a failed split is recorded, never repaired.
+    """
+    from mne.decoding import XdawnTransformer
+
+    try:
+        xd = XdawnTransformer(n_components=k, reg="ledoit_wolf")
+        xd.fit(fit_data, np.zeros(len(fit_data), dtype=int))
+    except Exception:
+        return None
+    return xd.patterns_[0][:k].T @ xd.filters_[0][:k]
+
+
 def _split_half_reproducibility(data, n_reps, seed):
     """Held-out split-half reproducibility of sensor data vs a DSS projection.
 
     Per repetition the trials are split in two: one half fits the DSS, the other
     half is split again and used only for evaluation. Nothing that is scored was
     seen by the estimator.
+
+    Three comparators share the rank ``k`` that DSS selected: a plain PCA
+    projector, and Xdawn -- the spatial filter MNE-Python already ships for
+    exactly this job. Xdawn's regularisation is NOT tuned; it runs at
+    ``ledoit_wolf``, which is why its failures are reported as observed rather
+    than as a claim about Xdawn.
     """
     from mne_denoise.dss import DSS, AverageBias
 
     rng = np.random.default_rng(seed)
     n_epochs = data.shape[0]
-    out = {"sensor": [], "dss": [], "pca": [], "component1": [], "k": []}
+    out = {"sensor": [], "dss": [], "pca": [], "xdawn": [], "component1": [], "k": []}
     for _ in range(n_reps):
         order = rng.permutation(n_epochs)
         fit_idx, eval_idx = order[: n_epochs // 2], order[n_epochs // 2:]
@@ -789,17 +928,40 @@ def _split_half_reproducibility(data, n_reps, seed):
                                 full_matrices=False)
         proj = u[:, :k] @ u[:, :k].T
 
-        for key, evk_a, evk_b in (
+        # Xdawn at the same rank, fitted on the same trials. A single class is
+        # used because AverageBias also ignores condition. Rows of filters_ and
+        # patterns_ are components, so the back-projection needs patterns_.T --
+        # verified by checking patterns_.T @ filters_ == I at full rank.
+        proj_xd = _xdawn_projector(data[fit_idx], k)
+
+        arms = [
             ("sensor", data[a_idx].mean(0), data[b_idx].mean(0)),
             ("dss", _project(data[a_idx]).mean(0), _project(data[b_idx]).mean(0)),
             ("pca", proj @ data[a_idx].mean(0), proj @ data[b_idx].mean(0)),
             ("component1",
              np.einsum("j,ejt->et", filters[0], data[a_idx]).mean(0),
              np.einsum("j,ejt->et", filters[0], data[b_idx]).mean(0)),
-        ):
+        ]
+        if proj_xd is None:
+            out["xdawn"].append(float("nan"))
+        else:
+            arms.append(("xdawn", proj_xd @ data[a_idx].mean(0),
+                         proj_xd @ data[b_idx].mean(0)))
+
+        for key, evk_a, evk_b in arms:
             x, y = np.ravel(evk_a), np.ravel(evk_b)
             out[key].append(float(np.corrcoef(x, y)[0, 1]))
-    return {k: float(np.mean(v)) for k, v in out.items()}
+
+    # Means keep the existing Act 3 numbers bit-identical. Medians are reported
+    # alongside because the Xdawn arm is heavy-tailed -- it collapses on a few
+    # splits, and a mean alone would hide both the typical case and the failure.
+    summary = {k: float(np.nanmean(v)) for k, v in out.items()}
+    summary.update({f"{key}_median": float(np.nanmedian(out[key]))
+                    for key in ("sensor", "dss", "pca", "xdawn")})
+    summary["xdawn_failed"] = int(np.isnan(out["xdawn"]).sum())
+    summary["xdawn_worst"] = float(np.nanmin(out["xdawn"])) if any(
+        not np.isnan(v) for v in out["xdawn"]) else float("nan")
+    return summary
 
 
 def _condition_auc(data, labels, times, seed):
@@ -901,6 +1063,34 @@ def prepare_dss(root: Path | None = None) -> None:
         repro = _split_half_reproducibility(data, SPLIT_HALF_REPS_SUBJECT, DSS_SEED)
     log.info("  reproducibility r: sensor=%.4f  dss=%.4f  pca(control)=%.4f  comp1=%.4f",
              repro["sensor"], repro["dss"], repro["pca"], repro["component1"])
+    log.info("  head-to-head (median r): sensor=%.4f  pca=%.4f  dss=%.4f  xdawn=%.4f",
+             repro["sensor_median"], repro["pca_median"], repro["dss_median"],
+             repro["xdawn_median"])
+    log.info("  xdawn worst split %.4f, hard failures %d/%d -- regularisation NOT tuned",
+             repro["xdawn_worst"], repro["xdawn_failed"], SPLIT_HALF_REPS_SUBJECT)
+
+    # -- how much of Xdawn's subspace does DSS actually find? ------------------
+    # Answers the obvious maintainer question directly instead of asserting that
+    # one method "is" the other.
+    proj_ref = _xdawn_projector(data, n_selected)
+    if proj_ref is None:
+        overlap = []
+    else:
+        xd_patterns = np.linalg.svd(proj_ref, full_matrices=False)[0][:, :n_selected]
+        overlap = _subspace_overlap(dss.patterns_[:, :n_selected], xd_patterns).tolist()
+        log.info("  DSS vs Xdawn principal-angle cosines: %s (mean %.3f)",
+                 np.round(overlap, 3).tolist(), float(np.mean(overlap)))
+
+    # -- the two framework measurements (synthetic, fast) ----------------------
+    with _timed("bias-swap + ICA-equivalence measurements"):
+        bias_swap = _bias_swap_measurement()
+        ica_equiv = _ica_equivalence()
+    log.info("  bias swap: AverageBias->evoked %.3f | BandpassBias->alpha %.3f | "
+             "PCA->alpha %.3f",
+             bias_swap["AverageBias"]["evoked"], bias_swap["BandpassBias"]["alpha"],
+             bias_swap["PCA"]["alpha"])
+    log.info("  IterativeDSS(tanh) vs FastICA matched |r|: %s",
+             np.round(ica_equiv["matched_pair_r"], 3).tolist())
 
     # -- (B) held-out condition discriminability ------------------------------
     with _timed(f"condition AUC ({CV_SPLITS}x{CV_REPEATS} folds)"):
@@ -919,11 +1109,16 @@ def prepare_dss(root: Path | None = None) -> None:
             group[name] = {
                 "baseline_snr": snr[name],
                 "r_sensor": grep["sensor"], "r_dss": grep["dss"], "r_pca": grep["pca"],
+                "r_xdawn": grep["xdawn"],
                 "auc_sensor": gs, "auc_dss": gd, "k": gk,
             }
 
     dr = np.array([g["r_dss"] - g["r_sensor"] for g in group.values()])
     da = np.array([g["auc_dss"] - g["auc_sensor"] for g in group.values()])
+    # The honest comparisons: against the controls, not only against doing nothing.
+    dp = np.array([g["r_dss"] - g["r_pca"] for g in group.values()])
+    dx = np.array([g["r_dss"] - g["r_xdawn"] for g in group.values()])
+    ps = np.array([g["r_pca"] - g["r_sensor"] for g in group.values()])
     group_summary = {
         "n_subjects": len(group),
         "reproducibility_gain_median": float(np.median(dr)),
@@ -932,6 +1127,11 @@ def prepare_dss(root: Path | None = None) -> None:
         "auc_change_median": float(np.median(da)),
         "auc_change_iqr": [float(np.percentile(da, 25)), float(np.percentile(da, 75))],
         "auc_change_positive": int((da > 0).sum()),
+        "dss_over_pca_median": float(np.median(dp)),
+        "dss_over_pca_positive": int((dp > 0).sum()),
+        "dss_over_xdawn_median": float(np.nanmedian(dx)),
+        "dss_over_xdawn_positive": int(np.nansum(dx > 0)),
+        "pca_over_sensor_positive": int((ps > 0).sum()),
     }
     log.info("  GROUP (n=%d): median reproducibility gain %+.4f (%d/%d subjects up)",
              len(group), group_summary["reproducibility_gain_median"],
@@ -939,6 +1139,13 @@ def prepare_dss(root: Path | None = None) -> None:
     log.info("  GROUP (n=%d): median AUC change          %+.4f (%d/%d subjects up)",
              len(group), group_summary["auc_change_median"],
              group_summary["auc_change_positive"], len(group))
+    log.info("  GROUP: DSS over matched-rank PCA %+.4f (%d/%d) | over Xdawn %+.4f (%d/%d)",
+             group_summary["dss_over_pca_median"],
+             group_summary["dss_over_pca_positive"], len(group),
+             group_summary["dss_over_xdawn_median"],
+             group_summary["dss_over_xdawn_positive"], len(group))
+    log.info("  GROUP: plain PCA already beats raw sensor space in %d/%d subjects",
+             group_summary["pca_over_sensor_positive"], len(group))
 
     # -- cache -----------------------------------------------------------------
     epochs.save(du.cache_path("dss_demo-epo.fif"), overwrite=True, verbose="ERROR")
@@ -975,6 +1182,9 @@ def prepare_dss(root: Path | None = None) -> None:
         "n_selected": n_selected,
         "eigenvalues": dss.eigenvalues_.tolist(),
         "reproducibility": repro,
+        "subspace_overlap_dss_xdawn": overlap,
+        "bias_swap": bias_swap,
+        "ica_equivalence": ica_equiv,
         "auc": {"sensor": auc_sensor, "dss": auc_dss, "mean_k": mean_k},
         "n_face": int((labels == 0).sum()),
         "n_car": int((labels == 1).sum()),
@@ -1004,6 +1214,34 @@ def prepare_dss(root: Path | None = None) -> None:
                 "reps_subject": SPLIT_HALF_REPS_SUBJECT,
                 "reps_group": SPLIT_HALF_REPS_GROUP,
                 "control": "plain PCA at the same rank",
+                "comparator": (
+                    "mne.decoding.XdawnTransformer at the same rank, single "
+                    "class, reg='ledoit_wolf'. Regularisation deliberately NOT "
+                    "tuned -- a poor split is reported as observed, never as a "
+                    "claim that Xdawn is unstable."
+                ),
+            },
+            "bias_swap": {
+                "fixture": (
+                    f"synthetic, seed {FIXTURE_SEED}, 120 trials x 32 ch; a "
+                    f"phase-locked evoked source at amplitude "
+                    f"{FIXTURE_EVOKED_AMP} and a non-phase-locked 10 Hz rhythm "
+                    f"at {FIXTURE_ALPHA_AMP} -- the distractor is the STRONGER "
+                    "source, declared before any result was inspected"
+                ),
+                "scored_by": "|cos| of component 1 against each planted pattern",
+                "arms": "DSS(AverageBias), DSS(BandpassBias 8-12 Hz), plain PCA",
+            },
+            "ica_equivalence": {
+                "claim_under_test": (
+                    "mne_denoise/dss/nonlinear.py:646-653 -- IterativeDSS is "
+                    "'equivalent to FastICA when using ICA contrast functions'"
+                ),
+                "method": (
+                    "4 known sources (laplace, square, sinusoid, gaussian) mixed "
+                    "into 8 channels; IterativeDSS(TanhMaskDenoiser, beta_tanh) "
+                    "vs sklearn FastICA(logcosh). Both recoveries reported."
+                ),
             },
             "discriminability": {
                 "cv": f"RepeatedStratifiedKFold({CV_SPLITS}x{CV_REPEATS})",

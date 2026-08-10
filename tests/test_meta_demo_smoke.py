@@ -269,6 +269,44 @@ def test_dss_target_panel_with_group_scatter():
     assert len(fig.axes) == 2
 
 
+def test_dss_framework_panel_draws_both_arguments():
+    bias_swap = {
+        "PCA": {"evoked": 0.07, "alpha": 1.00},
+        "AverageBias": {"evoked": 0.99, "alpha": 0.03},
+        "BandpassBias": {"evoked": 0.06, "alpha": 1.00},
+        "_amplitudes": {"evoked": 1.1, "alpha": 1.4},
+    }
+    head = {"sensor_median": 0.9675, "pca_median": 0.9712,
+            "dss_median": 0.9747, "xdawn_median": 0.9787}
+    group = {"n_subjects": 40, "dss_over_pca_positive": 32,
+             "dss_over_xdawn_positive": 15}
+    with du.presentation_theme():
+        fig = du.plot_dss_framework_panel(bias_swap, head, group=group)
+    assert len(fig.axes) == 2
+    # Left panel: three criteria x two planted patterns.
+    assert len(fig.axes[0].patches) == 6
+    # Right panel: the comparator that already exists must be on screen.
+    assert len(fig.axes[1].patches) == 4
+    assert "Xdawn" in " ".join(t.get_text() for t in fig.axes[1].get_xticklabels())
+
+
+def test_dss_cache_reports_every_comparator():
+    """The honest baselines must survive in the cache, not just in prose."""
+    metrics = du.load_json(du.cache_path("dss_metrics.json"))
+    repro = metrics["reproducibility"]
+    for key in ("sensor", "pca", "dss", "xdawn"):
+        assert f"{key}_median" in repro, f"missing {key}_median"
+    summary = du.load_json(du.cache_path("dss_group.json"))["summary"]
+    for key in ("dss_over_pca_positive", "dss_over_xdawn_positive",
+                "pca_over_sensor_positive"):
+        assert key in summary, f"missing {key}"
+    # Panel A only makes its point if PCA really does return the distractor.
+    swap = metrics["bias_swap"]
+    assert swap["PCA"]["alpha"] > swap["PCA"]["evoked"]
+    assert swap["AverageBias"]["evoked"] > swap["AverageBias"]["alpha"]
+    assert swap["BandpassBias"]["alpha"] > swap["BandpassBias"]["evoked"]
+
+
 def test_attenuation_preservation_includes_every_row():
     rows = [
         {"method": "uncorrected", "attenuation_pct": 0.0, "alpha_vs_background_db": 0.0,

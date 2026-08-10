@@ -132,7 +132,7 @@ No cell exceeds 3 s.
 | 1 — line noise | Can two methods remove the same 50 Hz peak at different cost? | R(50 Hz) 1.40 → notch **0.17** (a fifth of the surrounding floor) → ZapLine+ **1.00** (at the floor). ZapLine+ pays 0.087 dB of broadband distortion; the notch pays 0.0005 dB. |
 | 2 — ASR | What did ASR detect, and what did it cost? | Artifact-interval RRMSE 0.492 → **0.160**. Artifact-free RRMSE 0.003 → **0.165** — a real cost. `calibration_info_` explains it: at 20 s the calibration has 27 samples per channel dimension and *both* endpoints get worse. |
 | 2b — ASR variants | Which of the four ASR variants does this recording need? | Robustness to a contaminated calibration comes from `cov_estimator`, not from `method=` — the threshold inflates **+20%** with `mean` and **+9%** with the default `geometric_median`, while `standard` and `riemannian_windowed` are numerically identical. On real mobile EEG the window selector is **not** starving (74%), so Juggler is not indicated. |
-| 3 — DSS | What if the goal is to concentrate a signal, not remove an artifact? | Split-half reproducibility improves in **37/40** participants. Held-out faces-vs-cars AUC improves in only **25/40**. Declaring the target does not hand you the science. |
+| 3 — DSS | Why do I need this, when MNE already ships Xdawn and SSD? | Because the criterion is an argument. On one fixture with two planted sources, component 1 follows whatever is declared: PCA → the rhythm (\|cos\| **1.00**, it has more variance), `AverageBias` → the evoked source (**0.995**), `BandpassBias` → the rhythm (**0.999**). On real N170 data DSS does **not** win: it beats matched-rank PCA in 32/40 but `mne.decoding.XdawnTransformer` in only **15/40**, and plain PCA beats raw sensors in **40/40**. Reproducibility improves in 37/40, condition AUC in only 25/40. |
 | 4 — movement | Does attenuation mean the method worked? | iCanClean removes 11.5% of the scalp↔neck-EMG muscle coupling — and a reference time-shifted by 100 s removes **10.5%**. ASR/rASR at the shipped default are essentially inert here (0.03 components per window). |
 
 ## F. Datasets
@@ -337,11 +337,24 @@ These are real, reproduced, and **not worked around** in the demo.
 - Act 2 — artifact RRMSE 0.49 → 0.16; artifact-free 0.00 → 0.17
 - Act 2b — threshold inflation +20% (`mean`) vs +9% (`geometric_median`);
   calibration supply on mobile EEG 74% / 74% / 24% / 66%
-- Act 3 — reproducibility up in 37/40; discriminability up in 25/40
+- Act 3 — bias swap: PCA → alpha 1.00, `AverageBias` → evoked 0.995,
+  `BandpassBias` → alpha 0.999. Median held-out reproducibility: sensors 0.9675,
+  PCA 0.9712, DSS 0.9747, **Xdawn 0.9787**. DSS beats PCA 32/40, Xdawn 15/40;
+  PCA beats sensors 40/40. Reproducibility up 37/40; discriminability up 25/40.
 - Act 4 — real reference 11.5%, scrambled reference 10.5%
 
 ### Likely questions
 
+- *"Why DSS when MNE has Xdawn and SSD?"* — Not because it scores better; on the
+  N170 arm Xdawn wins on the median (15/40 for DSS). Because
+  `max_w (wᵀR_biased w)/(wᵀR_baseline w)` leaves `R_biased` as an argument, and
+  Xdawn/SSD/CSP each freeze it. Swap the argument and the same estimator answers
+  a different question — that is the left panel of the Act 3 figure.
+- *"Isn't DSS just PCA/ICA?"* — Identity bias gives eigenvalues of exactly 1.0
+  (deep dive 04: max deviation 3e-15), so the bias is the entire content. With a
+  non-linear contrast, `IterativeDSS` + `TanhMaskDenoiser` lands on FastICA's
+  components at \|r\| = 1.000 / 0.999 / 0.895 / 0.894 — close, not identical, and
+  FastICA recovered all four sources where DSS got three.
 - *"Isn't rASR for sleep?"* — No; that's `dusk2dawn`. See the ASR family table.
 - *"Why doesn't rASR beat standard?"* — Because its robustness is already the
   default here. Show the `cov_estimator` panel.

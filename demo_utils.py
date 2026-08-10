@@ -873,6 +873,78 @@ def plot_dss_target_panel(
     return fig
 
 
+def plot_dss_framework_panel(
+    bias_swap: Mapping[str, Any],
+    head_to_head: Mapping[str, float],
+    *,
+    group: Mapping[str, int] | None = None,
+):
+    """Why DSS, in two panels.
+
+    Left: the same estimator on the same data under three different criteria,
+    scored against the two planted patterns. The distractor rhythm is the
+    stronger source, so variance-maximisation returns it -- that is measured
+    here, not asserted.
+
+    Right: the honest head-to-head on real evoked data against the comparators
+    that already exist, including the one MNE-Python ships for this job.
+    """
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(1, 2, figsize=(15.5, 5.6))
+
+    # ---- left: swap the criterion, same data ------------------------------
+    ax = axes[0]
+    arms = ("PCA", "AverageBias", "BandpassBias")
+    nice = {"PCA": "PCA\n(variance)", "AverageBias": "DSS\nAverageBias",
+            "BandpassBias": "DSS\nBandpassBias"}
+    x = np.arange(len(arms))
+    w = 0.36
+    ev = [float(bias_swap[a]["evoked"]) for a in arms]
+    al = [float(bias_swap[a]["alpha"]) for a in arms]
+    ax.bar(x - w / 2, ev, w, label="evoked pattern", color=DEMO_COLORS["target"])
+    ax.bar(x + w / 2, al, w, label="alpha pattern", color=DEMO_COLORS["reference"])
+    for xi, (a, b) in enumerate(zip(ev, al)):
+        ax.text(xi - w / 2, a + 0.02, f"{a:.2f}", ha="center", fontsize=12)
+        ax.text(xi + w / 2, b + 0.02, f"{b:.2f}", ha="center", fontsize=12)
+    ax.set_xticks(x)
+    ax.set_xticklabels([nice[a] for a in arms])
+    ax.set_ylim(0, 1.18)
+    ax.set_ylabel("|cos| of component 1 to planted pattern")
+    ax.set_title("Same data, same estimator — one argument changed")
+    ax.legend(frameon=False, loc="upper center", ncol=2, fontsize=12)
+    _hide_spines(ax)
+
+    # ---- right: the honest head-to-head -----------------------------------
+    ax = axes[1]
+    order = ("sensor", "pca", "dss", "xdawn")
+    label = {"sensor": "raw\nsensors", "pca": "PCA\nmatched rank",
+             "dss": "DSS\nAverageBias", "xdawn": "Xdawn\n(in MNE)"}
+    colour = {"sensor": DEMO_COLORS["original"], "pca": DEMO_COLORS["floor"],
+              "dss": DEMO_COLORS["dss"], "xdawn": DEMO_COLORS["warning"]}
+    vals = [float(head_to_head[f"{k}_median"]) for k in order]
+    ax.bar(range(len(order)), vals, 0.6, color=[colour[k] for k in order])
+    for i, v in enumerate(vals):
+        ax.text(i, v + 0.0012, f"{v:.4f}", ha="center", fontsize=13)
+    ax.set_xticks(range(len(order)))
+    ax.set_xticklabels([label[k] for k in order])
+    lo = min(vals)
+    ax.set_ylim(lo - 0.012, max(vals) + 0.008)
+    ax.set_ylabel("median split-half reproducibility (held out)")
+    ax.set_title("Enhancing an evoked response — everyone can do this")
+    if group is not None:
+        n = group["n_subjects"]
+        ax.set_xlabel(
+            f"across {n} participants: DSS beats matched-rank PCA in "
+            f"{group['dss_over_pca_positive']}/{n}\n"
+            f"and Xdawn in only {group['dss_over_xdawn_positive']}/{n}",
+            fontsize=12.5, labelpad=10, color=DEMO_COLORS["original"])
+    _hide_spines(ax)
+
+    fig.subplots_adjust(left=0.07, right=0.985, top=0.90, bottom=0.20, wspace=0.24)
+    return fig
+
+
 def plot_attenuation_preservation(
     rows: Sequence[Mapping[str, Any]],
     *,
