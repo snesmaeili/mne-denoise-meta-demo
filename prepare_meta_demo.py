@@ -1555,13 +1555,23 @@ def prepare_movement(root: Path | None = None) -> None:
 # Declared before any iCanClean result was inspected.
 EOG_SUBJECT = "sub-005"            # the Act 3 representative, chosen DSS-blind
 EOG_REFS = ("HEOG_left", "HEOG_right", "VEOG_lower")
-EOG_SHIFT_S = 97.0                 # negative control, matching the ds004505 design
 EOG_BLINK_TMIN, EOG_BLINK_TMAX = -0.5, 0.5
 EOG_BLINK_BASELINE = (-0.5, -0.3)
 EOG_ALPHA_BAND = (8.0, 13.0)
 EOG_FLANK_BANDS = ((5.0, 7.0), (18.0, 25.0))
 EOG_POSTERIOR = ("O1", "Oz", "O2", "PO3", "PO4", "PO7", "PO8",
                  "P3", "P4", "P7", "P8", "Pz")
+#: The N170 is measured at these sites in the ERP CORE reference implementation.
+EOG_N170_ROI = ("PO7", "PO8")
+#: Pseudo-reference filters. iCanClean's original MATLAB mode built the CCA
+#: reference from a filtered copy of the EEG itself, so no dedicated electrodes
+#: are needed. ``('notch', ...)`` matches MATLAB ``filtYtype='Notch'``; the
+#: lowpass is the other obvious way to isolate a slow artifact. BOTH are
+#: reported -- neither was chosen after seeing the endpoint.
+EOG_PSEUDO_FILTERS = (
+    ("pseudo-reference\n(notch 8-30 Hz)", 30.0, 8.0),
+    ("pseudo-reference\n(lowpass 5 Hz)", None, 5.0),
+)
 
 
 def _eog_raw(data_root: Path):
@@ -1583,14 +1593,25 @@ def _eog_raw(data_root: Path):
     return raw
 
 
-def _shift_refs(raw, ref_names, shift_s):
-    """Circularly shift only the reference channels -- the negative control."""
+def _attach_pseudo_reference(raw, eeg_names, l_freq, h_freq):
+    """Build iCanClean's pseudo-reference: a filtered copy of the EEG itself.
+
+    The original MATLAB mode (``filtYtype='Notch'``) needs no dedicated
+    electrodes -- it filters the scalp channels so that what survives is mostly
+    artifact, and uses that as the CCA reference. The ``pseudo_ref=True``
+    shortcut existed in this package (commit 80b02e0) and was removed in the
+    PR-26 refactor, so the reference is constructed explicitly here using only
+    the shipped API.
+    """
     import mne
 
-    data = raw.get_data()
-    idx = [raw.ch_names.index(c) for c in ref_names]
-    data[idx] = np.roll(data[idx], round(shift_s * raw.info["sfreq"]), axis=1)
-    return mne.io.RawArray(data, raw.info.copy(), verbose="ERROR")
+    filtered = mne.filter.filter_data(
+        raw.copy().pick(eeg_names).get_data(), raw.info["sfreq"],
+        l_freq, h_freq, verbose="ERROR")
+    names = [f"PSEUDO{i:03d}" for i in range(len(eeg_names))]
+    extra = mne.io.RawArray(
+        filtered, mne.create_info(names, raw.info["sfreq"], "eeg"), verbose="ERROR")
+    return raw.copy().add_channels([extra], force_update_info=True), names
 
 
 def prepare_eog(root: Path | None = None) -> None:
@@ -1620,6 +1641,36 @@ def prepare_eog(root: Path | None = None) -> None:
                                                verbose="ERROR")
     log.info("  %d blinks detected (%.1f/min over %.0f s)",
              len(blinks), 60.0 * len(blinks) / raw.times[-1], raw.times[-1])
+
+    # The science endpoint: the faces-vs-cars N170 effect. Blinks are not
+    # condition-locked, so honest blink removal should leave this alone or
+    # sharpen it. Anything that flattens or inverts it removed brain.
+    events, event_id = mne.events_from_annotations(raw, verbose="ERROR")
+    code = {}
+    for key, val in event_id.items():
+        try:
+            code[int(key)] = val
+        except ValueError:
+            continue
+    face_ids = [code[c] for c in range(1, 41) if c in code]
+    car_ids = [code[c] for c in range(41, 81) if c in code]
+    n170_ev = events.copy()
+    m_face = np.isin(events[:, 2], face_ids)
+    m_car = np.isin(events[:, 2], car_ids)
+    n170_ev[m_face, 2] = 1
+    n170_ev[m_car, 2] = 2
+    n170_ev = n170_ev[m_face | m_car]
+    roi = [eeg_names.index(c) for c in EOG_N170_ROI if c in eeg_names]
+
+    def _n170_effect(inst):
+        ep = mne.Epochs(inst, n170_ev, event_id={"face": 1, "car": 2},
+                        tmin=N170_TMIN, tmax=N170_TMAX, baseline=N170_BASELINE,
+                        picks=eeg_names, preload=True, reject=None, proj=True,
+                        verbose="ERROR")
+        t = ep.times
+        win = (t >= N170_WINDOW[0]) & (t <= N170_WINDOW[1])
+        diff = ep["face"].average().data - ep["car"].average().data
+        return float(diff[roi][:, win].mean()) * 1e6
 
     def _blink_evoked(inst):
         ep = mne.Epochs(inst, blinks, tmin=EOG_BLINK_TMIN, tmax=EOG_BLINK_TMAX,
@@ -1659,55 +1710,64 @@ def prepare_eog(root: Path | None = None) -> None:
     log.info("  uncorrected blink-locked p2p %.2f uV (mean over %d EEG channels)",
              base_p2p, len(eeg_names))
 
+    base_effect = _n170_effect(raw)
+    log.info("  uncorrected faces-vs-cars N170 effect at %s: %+.4f uV",
+             "/".join(EOG_N170_ROI), base_effect)
+
     rows: list[dict[str, Any]] = [{
         "method": "uncorrected", "blink_p2p_uv": base_p2p, "attenuation_pct": 0.0,
-        "alpha_vs_background_db": 0.0, "control": False,
+        "alpha_vs_background_db": 0.0, "n170_effect_uv": base_effect,
+        "n170_effect_pct": 100.0, "reference_kind": "none",
         "mean_r2": None, "components_removed": None, "runtime_s": None,
     }]
     traces: dict[str, Any] = {"times": evk0.times, "uncorrected": evk0.data}
 
-    specs = [
-        ("iCanClean", "icc", False),
-        ("iCanClean\n(shifted ref)", "icc", True),
-        ("EOG regression", "reg", False),
-        ("EOG regression\n(shifted ref)", "reg", True),
-    ]
-    for label, kind, control in specs:
-        work = _shift_refs(raw, eog_names, EOG_SHIFT_S) if control else raw.copy()
-        mean_r2 = n_removed = None
-        with _timed(f"{label.replace(chr(10), ' ')}") as t:
-            if kind == "icc":
-                est = ICanClean(sfreq=sfreq, ref_channels=eog_names,
-                                primary_channels=eeg_names)
-                out = est.fit_transform(work)
-                # correlations_ holds SQUARED canonical correlations despite the
-                # name, and n_removed_ is an array over windows.
-                mean_r2 = float(np.nanmean(est.correlations_))
-                n_removed = float(est.n_removed_.mean())
-            else:
-                out = EOGRegression(picks=eeg_names,
-                                    picks_artifact=eog_names).fit(work).apply(work.copy())
+    def _record(label, out, kind, est=None, runtime=None):
         evk = _blink_evoked(out)
         p2p = float(np.ptp(evk.data, axis=1).mean()) * 1e6
         _, psd1 = _psd(out)
+        effect = _n170_effect(out)
         rows.append({
             "method": label, "blink_p2p_uv": p2p,
             "attenuation_pct": 100.0 * (1.0 - p2p / base_p2p),
-            "alpha_vs_background_db": _alpha_db(psd1), "control": control,
-            "mean_r2": mean_r2, "components_removed": n_removed,
-            "runtime_s": t.dt,
+            "alpha_vs_background_db": _alpha_db(psd1),
+            "n170_effect_uv": effect,
+            "n170_effect_pct": 100.0 * effect / base_effect,
+            "reference_kind": kind,
+            # correlations_ holds SQUARED canonical correlations despite the
+            # name, and n_removed_ is an array over windows.
+            "mean_r2": None if est is None else float(np.nanmean(est.correlations_)),
+            "components_removed": None if est is None else float(est.n_removed_.mean()),
+            "runtime_s": runtime,
         })
         traces[label] = evk.data
-        log.info("  %-30s blink %6.2f uV (%+5.1f%%)   posterior alpha %+.3f dB",
+        log.info("  %-32s blink %6.2f uV (%+5.1f%%) | N170 effect %+.3f uV "
+                 "(%+4.0f%%) | alpha %+.2f dB",
                  label.replace("\n", " "), p2p, rows[-1]["attenuation_pct"],
+                 effect, rows[-1]["n170_effect_pct"],
                  rows[-1]["alpha_vs_background_db"])
 
-    if "iCanClean" in traces:
-        icc = next(r for r in rows if r["method"] == "iCanClean")
-        ctl = next(r for r in rows if r["method"].startswith("iCanClean\n"))
-        log.info("  control separation: %.1f pp attenuation, mean R2 %.3f vs %.3f",
-                 icc["attenuation_pct"] - ctl["attenuation_pct"],
-                 icc["mean_r2"], ctl["mean_r2"])
+    # 1. Dedicated electrodes -- the reference actually recorded the artifact.
+    with _timed("iCanClean (real EOG reference)") as t:
+        est = ICanClean(sfreq=sfreq, ref_channels=eog_names,
+                        primary_channels=eeg_names)
+        out = est.fit_transform(raw.copy())
+    _record("iCanClean\n(EOG electrodes)", out, "recorded", est, t.dt)
+
+    # 2. The comparator MNE already ships, on the same electrodes.
+    with _timed("EOG regression") as t:
+        out = EOGRegression(picks=eeg_names,
+                            picks_artifact=eog_names).fit(raw).apply(raw.copy())
+    _record("EOG regression", out, "recorded", None, t.dt)
+
+    # 3. No electrodes at all: the reference is built from the EEG itself.
+    for label, lo, hi in EOG_PSEUDO_FILTERS:
+        aug, pseudo_names = _attach_pseudo_reference(raw, eeg_names, lo, hi)
+        with _timed(label.replace("\n", " ")) as t:
+            est = ICanClean(sfreq=sfreq, ref_channels=pseudo_names,
+                            primary_channels=eeg_names)
+            out = est.fit_transform(aug).pick(eeg_names)
+        _record(label, out, "pseudo", est, t.dt)
 
     du.save_npz(du.cache_path("eog_traces.npz"), freqs=freqs, **traces)
     du.save_json(du.cache_path("eog_metrics.json"), {
@@ -1722,6 +1782,9 @@ def prepare_eog(root: Path | None = None) -> None:
         "alpha_band_hz": list(EOG_ALPHA_BAND),
         "flank_bands_hz": [list(b) for b in EOG_FLANK_BANDS],
         "baseline_blink_p2p_uv": base_p2p,
+        "baseline_n170_effect_uv": base_effect,
+        "n170_roi": list(EOG_N170_ROI),
+        "n170_window_s": list(N170_WINDOW),
         "blink_channel": eeg_names[worst],
         "blink_channel_index": worst,
         "rows": rows,
@@ -1747,15 +1810,30 @@ def prepare_eog(root: Path | None = None) -> None:
                 "citation": "Gratton, Coles & Donchin (1983)",
                 "note": "same reference channels, same baseline, same control",
             },
-            "negative_control": {
-                "construction": f"reference channels circularly shifted {EOG_SHIFT_S:.0f} s",
-                "rationale": "identical spectra, no true alignment to the scalp",
+            "pseudo_reference": {
+                "construction": ("a filtered copy of the scalp channels is used "
+                                 "as the CCA reference -- no dedicated electrodes"),
+                "filters": [f"{lo}-{hi}" for _, lo, hi in EOG_PSEUDO_FILTERS],
+                "provenance": ("iCanClean's MATLAB filtYtype='Notch' mode. The "
+                               "pseudo_ref=True shortcut was added in mne-denoise "
+                               "80b02e0 and removed in the PR-26 refactor, so the "
+                               "reference is built explicitly from the shipped API."),
+                "note": ("both filter settings are reported; neither was chosen "
+                         "after seeing an endpoint"),
             },
             "endpoints": {
                 "attenuation": ("blink-locked evoked peak-to-peak, averaged over "
                                 "all EEG channels"),
-                "preservation": ("median posterior alpha change, flank-normalised "
-                                 "against 5-7 and 18-25 Hz"),
+                "preservation_primary": (
+                    f"faces-vs-cars N170 effect at {'/'.join(EOG_N170_ROI)} over "
+                    f"{N170_WINDOW[0] * 1000:.0f}-{N170_WINDOW[1] * 1000:.0f} ms. "
+                    "Blinks are not condition-locked, so honest removal should "
+                    "leave this alone or sharpen it."),
+                "preservation_secondary": (
+                    "median posterior alpha, flank-normalised against 5-7 and "
+                    "18-25 Hz. Reported because it CANNOT see the pseudo-reference "
+                    "failure -- 8-13 Hz lies outside the band that method damages, "
+                    "which is the point."),
             },
         },
         selection_rule=(

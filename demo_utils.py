@@ -1050,22 +1050,23 @@ def plot_icanclean_control_panel(
     channel: int = 0,
     channel_name: str = "",
 ):
-    """What the control buys you, on both endpoints.
+    """Attenuation against the science, so removing more cannot hide as success.
 
     Left: the blink-locked evoked at a single channel — averaging across
     channels would cancel the blink, whose pattern is dipolar under an average
-    reference. Right: attenuation against neural preservation, so a method that
-    removes more by removing signal cannot hide.
+    reference. Right: blink attenuation against the faces-vs-cars N170 effect.
+    An arm that moves right while falling through zero removed the artifact by
+    removing the brain.
     """
     import matplotlib.pyplot as plt
 
     fig, axes = plt.subplots(1, 2, figsize=(15.5, 5.8))
     style = {
         "uncorrected": (DEMO_COLORS["original"], "-", 2.6),
-        "iCanClean": (DEMO_COLORS["icanclean"], "-", 2.6),
-        "iCanClean\n(shifted ref)": (DEMO_COLORS["warning"], "--", 1.8),
+        "iCanClean\n(EOG electrodes)": (DEMO_COLORS["icanclean"], "-", 2.6),
         "EOG regression": (DEMO_COLORS["asr"], "-", 2.2),
-        "EOG regression\n(shifted ref)": (DEMO_COLORS["floor"], "--", 1.8),
+        "pseudo-reference\n(notch 8-30 Hz)": (DEMO_COLORS["warning"], "--", 2.2),
+        "pseudo-reference\n(lowpass 5 Hz)": (DEMO_COLORS["notch"], "--", 1.8),
     }
 
     # ---- left: the blink itself -------------------------------------------
@@ -1081,33 +1082,37 @@ def plot_icanclean_control_panel(
     ax.legend(frameon=False, fontsize=11.5)
     _hide_spines(ax)
 
-    # ---- right: both endpoints at once ------------------------------------
+    # ---- right: attenuation against the science ---------------------------
     ax = axes[1]
+    base = next(float(r["n170_effect_uv"]) for r in rows
+                if str(r["method"]) == "uncorrected")
+    ys = [float(r["n170_effect_uv"]) for r in rows]
+    lo, hi = min(ys) - 0.35, max(ys) + 0.35
+    ax.axhspan(0.0, hi, color=DEMO_COLORS["warning"], alpha=0.07, zorder=0)
     for row in rows:
         name = str(row["method"])
-        if name == "uncorrected":
-            continue
         colour = style.get(name, (DEMO_COLORS["floor"],))[0]
-        control = bool(row.get("control"))
-        ax.scatter(float(row["attenuation_pct"]),
-                   float(row["alpha_vs_background_db"]),
-                   s=260, color="white" if control else colour,
+        pseudo = row.get("reference_kind") == "pseudo"
+        x = 0.0 if name == "uncorrected" else float(row["attenuation_pct"])
+        y = float(row["n170_effect_uv"])
+        ax.scatter(x, y, s=260, color="white" if pseudo else colour,
                    edgecolor=colour, linewidth=2.6, zorder=3,
-                   hatch="///" if control else None)
-        # Controls sit at the left edge, so label them to the right instead of
-        # centred above, where the text would run off the axes.
-        x = float(row["attenuation_pct"])
-        offset, align = ((16, -4), "left") if x < 20.0 else ((0, 16), "center")
-        ax.annotate(name.replace("\n", " "),
-                    (x, float(row["alpha_vs_background_db"])),
-                    textcoords="offset points", xytext=offset, ha=align,
-                    fontsize=12, color=colour)
-    ax.axhline(0.0, color=DEMO_COLORS["floor"], lw=1.2)
-    ax.axvline(0.0, color=DEMO_COLORS["floor"], lw=1.2)
+                   hatch="///" if pseudo else None)
+        # Label away from the right edge, and never on top of a neighbour.
+        align = "right" if x > 60.0 else "left"
+        dx = -18 if align == "right" else 18
+        ax.annotate(name.replace("\n", " "), (x, y), textcoords="offset points",
+                    xytext=(dx, -4), ha=align, fontsize=11.5, color=colour,
+                    zorder=4)
+    ax.axhline(0.0, color=DEMO_COLORS["warning"], lw=1.6)
+    ax.axhline(base, color=DEMO_COLORS["floor"], ls=":", lw=1.4)
+    ax.text(99, 0.06, "wrong sign — the effect is gone", ha="right", va="top",
+            fontsize=11.5, color=DEMO_COLORS["warning"], zorder=4)
     ax.set_xlabel("Blink attenuation (%)  →  more artifact removed")
-    ax.set_ylabel("Posterior alpha vs its own background (dB)")
-    ax.set_title("Removing more must not mean removing signal")
-    ax.set_xlim(-12, 100)
+    ax.set_ylabel("faces − cars N170 (µV)\n↑ stronger effect")
+    ax.set_title("The arm that removes the most destroys the effect")
+    ax.set_xlim(-8, 104)
+    ax.set_ylim(hi, lo)   # inverted: a stronger (more negative) effect is up
     _hide_spines(ax)
 
     fig.subplots_adjust(left=0.065, right=0.985, top=0.90, bottom=0.13, wspace=0.24)

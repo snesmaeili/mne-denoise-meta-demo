@@ -307,47 +307,61 @@ def test_dss_cache_reports_every_comparator():
     assert swap["BandpassBias"]["alpha"] > swap["BandpassBias"]["evoked"]
 
 
-def test_icanclean_control_panel_shows_both_endpoints():
+def test_icanclean_control_panel_plots_every_arm():
     times = np.linspace(-0.5, 0.5, 129)
     blink = np.exp(-(times**2) / 0.004)
     traces = {
         "uncorrected": np.tile(blink * 150e-6, (4, 1)),
-        "iCanClean": np.tile(blink * 25e-6, (4, 1)),
-        "iCanClean\n(shifted ref)": np.tile(blink * 145e-6, (4, 1)),
+        "iCanClean\n(EOG electrodes)": np.tile(blink * 25e-6, (4, 1)),
         "EOG regression": np.tile(blink * 45e-6, (4, 1)),
+        "pseudo-reference\n(notch 8-30 Hz)": np.tile(blink * 12e-6, (4, 1)),
     }
     rows = [
         {"method": "uncorrected", "attenuation_pct": 0.0,
-         "alpha_vs_background_db": 0.0, "control": False},
-        {"method": "iCanClean", "attenuation_pct": 83.1,
-         "alpha_vs_background_db": -0.40, "control": False},
-        {"method": "iCanClean\n(shifted ref)", "attenuation_pct": 4.2,
-         "alpha_vs_background_db": -0.48, "control": True},
+         "n170_effect_uv": -0.74, "alpha_vs_background_db": 0.0,
+         "reference_kind": "none"},
+        {"method": "iCanClean\n(EOG electrodes)", "attenuation_pct": 83.1,
+         "n170_effect_uv": -1.43, "alpha_vs_background_db": -0.40,
+         "reference_kind": "recorded"},
         {"method": "EOG regression", "attenuation_pct": 73.0,
-         "alpha_vs_background_db": -1.19, "control": False},
+         "n170_effect_uv": -1.15, "alpha_vs_background_db": -1.19,
+         "reference_kind": "recorded"},
+        {"method": "pseudo-reference\n(notch 8-30 Hz)", "attenuation_pct": 92.2,
+         "n170_effect_uv": +0.59, "alpha_vs_background_db": -0.78,
+         "reference_kind": "pseudo"},
     ]
     with du.presentation_theme():
         fig = du.plot_icanclean_control_panel(times, traces, rows,
                                               channel=0, channel_name="FP2")
     assert len(fig.axes) == 2
     assert "FP2" in fig.axes[0].get_ylabel()
-    # "uncorrected" is a reference line, not a point: 4 rows -> 3 scatter points.
-    assert len(fig.axes[1].collections) == 3
+    # Every arm is a point on the right, uncorrected included.
+    assert len(fig.axes[1].collections) == len(rows)
+    # A stronger (more negative) effect must plot higher.
+    bottom, top = fig.axes[1].get_ylim()
+    assert bottom > top
 
 
-def test_eog_cache_separates_method_from_control():
-    """The control must be far from the method, or the act has no argument."""
+def test_eog_cache_shows_attenuation_and_science_disagree():
+    """The act's whole argument: the best attenuation destroys the effect."""
     m = du.load_json(du.cache_path("eog_metrics.json"))
-    by = {r["method"]: r for r in m["rows"]}
-    icc, ctl = by["iCanClean"], by["iCanClean\n(shifted ref)"]
-    assert icc["attenuation_pct"] - ctl["attenuation_pct"] > 50.0
-    assert icc["mean_r2"] > ctl["mean_r2"]
-    # A sane operating point is the whole reason this arm works.
+    rows = m["rows"][1:]
+    by = {r["method"]: r for r in rows}
+    base = m["baseline_n170_effect_uv"]
+    assert base < 0.0, "the N170 effect is negative by definition"
+
+    best = max(rows, key=lambda r: r["attenuation_pct"])
+    assert best["reference_kind"] == "pseudo"
+    # It removes the most artifact and inverts the effect.
+    assert best["n170_effect_uv"] > 0.0
+    # And the alpha endpoint cannot see that, which is the teaching point.
+    assert best["alpha_vs_background_db"] > -1.0
+
+    recorded = by["iCanClean\n(EOG electrodes)"]
+    assert recorded["n170_effect_uv"] < base, "recorded refs should sharpen it"
+    assert recorded["attenuation_pct"] > by["EOG regression"]["attenuation_pct"]
+    # A sane operating point is why the recorded-reference arm works at all.
     assert m["samples_per_dimension"] > 10.0
-    reg = by["EOG regression"]
-    # Both endpoints, or the comparison means nothing.
-    assert icc["attenuation_pct"] > reg["attenuation_pct"]
-    assert icc["alpha_vs_background_db"] > reg["alpha_vs_background_db"]
 
 
 def test_movement_cache_records_the_widened_window_rerun():
