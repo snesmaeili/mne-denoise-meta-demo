@@ -24,6 +24,21 @@ notebook then executes in about ten seconds.
 Everything you see was computed by the software. Nothing is a screenshot, and
 nothing is transcribed from a manuscript.
 
+Prefer to read rather than run? **[View the executed notebook](executed_demo.html)**.
+
+## Going deeper
+
+Five focused notebooks sit behind the talk. Each runs standalone in Colab, in
+under fifteen seconds, mostly on synthetic data so nothing has to be downloaded.
+
+| | Notebook | What it adds |
+|---|---|---|
+| 01 | [ZapLine](deep_dives/01_zapline.ipynb) | notch vs fixed vs adaptive on a line that *moves*; what `adaptive_results_` records |
+| 02 | [ASR](deep_dives/02_asr.ipynb) | all four variants against known ground truth; where each looks for clean calibration data |
+| 03 | [iCanClean](deep_dives/03_icanclean.ipynb) | reference-based CCA — and the time-shifted control that tells you whether it worked |
+| 04 | [DSS](deep_dives/04_dss.ipynb) | two biases on identical data; why the stronger signal is not the one you get |
+| 05 | [Spectrum interpolation](deep_dives/05_spectrum_interpolation.ipynb) | phase-preserving line removal, and the rank it does not cost you |
+
 ---
 
 A five-minute live demo for the MNE-Python maintainers sprint. Four acts, four
