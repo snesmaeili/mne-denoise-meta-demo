@@ -125,7 +125,7 @@ def test_preflight_reports_missing_assets(tmp_path, monkeypatch, capsys):
     assert report["imports_ok"], report["import_error"]
     assert not report["ok"]
     assert set(report["acts"]) == {
-        "zapline", "asr", "asr_variants", "dss", "movement"}
+        "zapline", "asr", "asr_variants", "dss", "eog", "movement"}
     assert "NOT READY" in capsys.readouterr().out
 
 
@@ -305,6 +305,62 @@ def test_dss_cache_reports_every_comparator():
     assert swap["PCA"]["alpha"] > swap["PCA"]["evoked"]
     assert swap["AverageBias"]["evoked"] > swap["AverageBias"]["alpha"]
     assert swap["BandpassBias"]["alpha"] > swap["BandpassBias"]["evoked"]
+
+
+def test_icanclean_control_panel_shows_both_endpoints():
+    times = np.linspace(-0.5, 0.5, 129)
+    blink = np.exp(-(times**2) / 0.004)
+    traces = {
+        "uncorrected": np.tile(blink * 150e-6, (4, 1)),
+        "iCanClean": np.tile(blink * 25e-6, (4, 1)),
+        "iCanClean\n(shifted ref)": np.tile(blink * 145e-6, (4, 1)),
+        "EOG regression": np.tile(blink * 45e-6, (4, 1)),
+    }
+    rows = [
+        {"method": "uncorrected", "attenuation_pct": 0.0,
+         "alpha_vs_background_db": 0.0, "control": False},
+        {"method": "iCanClean", "attenuation_pct": 83.1,
+         "alpha_vs_background_db": -0.40, "control": False},
+        {"method": "iCanClean\n(shifted ref)", "attenuation_pct": 4.2,
+         "alpha_vs_background_db": -0.48, "control": True},
+        {"method": "EOG regression", "attenuation_pct": 73.0,
+         "alpha_vs_background_db": -1.19, "control": False},
+    ]
+    with du.presentation_theme():
+        fig = du.plot_icanclean_control_panel(times, traces, rows,
+                                              channel=0, channel_name="FP2")
+    assert len(fig.axes) == 2
+    assert "FP2" in fig.axes[0].get_ylabel()
+    # "uncorrected" is a reference line, not a point: 4 rows -> 3 scatter points.
+    assert len(fig.axes[1].collections) == 3
+
+
+def test_eog_cache_separates_method_from_control():
+    """The control must be far from the method, or the act has no argument."""
+    m = du.load_json(du.cache_path("eog_metrics.json"))
+    by = {r["method"]: r for r in m["rows"]}
+    icc, ctl = by["iCanClean"], by["iCanClean\n(shifted ref)"]
+    assert icc["attenuation_pct"] - ctl["attenuation_pct"] > 50.0
+    assert icc["mean_r2"] > ctl["mean_r2"]
+    # A sane operating point is the whole reason this arm works.
+    assert m["samples_per_dimension"] > 10.0
+    reg = by["EOG regression"]
+    # Both endpoints, or the comparison means nothing.
+    assert icc["attenuation_pct"] > reg["attenuation_pct"]
+    assert icc["alpha_vs_background_db"] > reg["alpha_vs_background_db"]
+
+
+def test_movement_cache_records_the_widened_window_rerun():
+    """Deep dive 03's diagnosis must be backed by cached measurements."""
+    m = du.load_json(du.cache_path("movement_metrics.json"))
+    by = {r["method"]: r for r in m["rows"]}
+    default = by["iCanClean"]
+    wide = by["iCanClean\n(30 s stats window)"]
+    assert default["samples_per_dimension"] < 3.0
+    assert wide["samples_per_dimension"] > 25.0
+    # Widening the estimate makes the "shared subspace" disappear entirely.
+    assert wide["components_removed"] == 0.0
+    assert wide["mean_r2"] < default["mean_r2"] / 5.0
 
 
 def test_attenuation_preservation_includes_every_row():

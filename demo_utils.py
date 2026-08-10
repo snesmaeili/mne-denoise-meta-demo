@@ -427,6 +427,11 @@ ASSETS: tuple[DemoAsset, ...] = (
          "dss_manifest.json"),
     ),
     DemoAsset(
+        "eog",
+        "iCanClean vs EOG references",
+        ("eog_metrics.json", "eog_traces.npz", "eog_manifest.json"),
+    ),
+    DemoAsset(
         "movement",
         "Movement attenuation/preservation",
         ("movement_metrics.json", "movement_traces.npz", "movement_manifest.json"),
@@ -952,13 +957,17 @@ def plot_attenuation_preservation(
     y_key: str = "alpha_vs_background_db",
     label_key: str = "method",
     x_label: str = "Artifact attenuation  (higher = more removed)",
-    y_label: str = "Neural endpoint retained  (higher = better)",
     title: str = "Attenuation alone can mislead",
     annotate: Mapping[str, str] | None = None,
-    ylim: tuple[float, float] | None = None,
     ax=None,
 ):
-    """Direct-labelled trade-off scatter: artifact removal vs neural preservation."""
+    """Horizontal attenuation bars, with the neural endpoint labelled inline.
+
+    There is deliberately no second axis: ``y_key`` is read and printed at the
+    end of each bar rather than plotted, because the point of the figure is the
+    ranking of attenuation and the fact that a negative control reaches nearly
+    the same place.
+    """
     import matplotlib.pyplot as plt
 
     if ax is None:
@@ -1029,8 +1038,79 @@ def plot_attenuation_preservation(
             va="center", ha="left", fontsize=13, fontweight="bold",
             color=DEMO_COLORS["warning"],
         )
-    del y_label, ylim
     fig.tight_layout()
+    return fig
+
+
+def plot_icanclean_control_panel(
+    times: np.ndarray,
+    traces: Mapping[str, np.ndarray],
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    channel: int = 0,
+    channel_name: str = "",
+):
+    """What the control buys you, on both endpoints.
+
+    Left: the blink-locked evoked at a single channel — averaging across
+    channels would cancel the blink, whose pattern is dipolar under an average
+    reference. Right: attenuation against neural preservation, so a method that
+    removes more by removing signal cannot hide.
+    """
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(1, 2, figsize=(15.5, 5.8))
+    style = {
+        "uncorrected": (DEMO_COLORS["original"], "-", 2.6),
+        "iCanClean": (DEMO_COLORS["icanclean"], "-", 2.6),
+        "iCanClean\n(shifted ref)": (DEMO_COLORS["warning"], "--", 1.8),
+        "EOG regression": (DEMO_COLORS["asr"], "-", 2.2),
+        "EOG regression\n(shifted ref)": (DEMO_COLORS["floor"], "--", 1.8),
+    }
+
+    # ---- left: the blink itself -------------------------------------------
+    ax = axes[0]
+    for name, data in traces.items():
+        colour, ls, lw = style.get(name, (DEMO_COLORS["floor"], "-", 1.5))
+        ax.plot(times, data[channel] * 1e6, color=colour, ls=ls, lw=lw,
+                label=name.replace("\n", " "))
+    ax.axvline(0.0, color=DEMO_COLORS["floor"], ls=":", lw=1.0)
+    ax.set_xlabel("Time from blink peak (s)")
+    ax.set_ylabel(f"Blink-locked evoked at {channel_name or 'channel'} (µV)")
+    ax.set_title("The artifact, and what each arm left behind")
+    ax.legend(frameon=False, fontsize=11.5)
+    _hide_spines(ax)
+
+    # ---- right: both endpoints at once ------------------------------------
+    ax = axes[1]
+    for row in rows:
+        name = str(row["method"])
+        if name == "uncorrected":
+            continue
+        colour = style.get(name, (DEMO_COLORS["floor"],))[0]
+        control = bool(row.get("control"))
+        ax.scatter(float(row["attenuation_pct"]),
+                   float(row["alpha_vs_background_db"]),
+                   s=260, color="white" if control else colour,
+                   edgecolor=colour, linewidth=2.6, zorder=3,
+                   hatch="///" if control else None)
+        # Controls sit at the left edge, so label them to the right instead of
+        # centred above, where the text would run off the axes.
+        x = float(row["attenuation_pct"])
+        offset, align = ((16, -4), "left") if x < 20.0 else ((0, 16), "center")
+        ax.annotate(name.replace("\n", " "),
+                    (x, float(row["alpha_vs_background_db"])),
+                    textcoords="offset points", xytext=offset, ha=align,
+                    fontsize=12, color=colour)
+    ax.axhline(0.0, color=DEMO_COLORS["floor"], lw=1.2)
+    ax.axvline(0.0, color=DEMO_COLORS["floor"], lw=1.2)
+    ax.set_xlabel("Blink attenuation (%)  →  more artifact removed")
+    ax.set_ylabel("Posterior alpha vs its own background (dB)")
+    ax.set_title("Removing more must not mean removing signal")
+    ax.set_xlim(-12, 100)
+    _hide_spines(ax)
+
+    fig.subplots_adjust(left=0.065, right=0.985, top=0.90, bottom=0.13, wspace=0.24)
     return fig
 
 

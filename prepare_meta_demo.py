@@ -1275,6 +1275,10 @@ MOVE_COUPLING_WIN_S = 1.0
 MOVE_SURROGATE_SHIFTS_S = (37.0, 71.0, 113.0, 149.0, 191.0, 233.0, 277.0, 313.0, 359.0)
 #: Circular shift applied to the reference block for the negative control.
 MOVE_SCRAMBLE_SHIFT_S = 100.0
+#: A CCA over 120 primary + 120 reference channels has 240 dimensions. The 2 s
+#: default window supplies 2.08 samples per dimension; this widens the stats
+#: window so the same fit gets ~31 instead. Declared, not tuned.
+MOVE_WIDE_STATS_S = 30.0
 MOVE_POSTERIOR = ("O1", "Oz", "O2", "PO3", "PO4", "POz", "PO7", "PO8", "P1", "P2",
                   "P3", "P4", "P5", "P6", "P7", "P8", "Pz")
 
@@ -1404,6 +1408,12 @@ def prepare_movement(root: Path | None = None) -> None:
         ("rASR", "asr", {"method": "riemannian_windowed"}),
         ("iCanClean", "icc", {}),
         ("iCanClean\n(scrambled ref)", "icc", {"scramble": True}),
+        # The same estimator with enough samples to estimate 240 dimensions
+        # honestly. Deep dive 03 uses this pair to show that the default-window
+        # attenuation above was overfitting, not a shared artifact.
+        ("iCanClean\n(30 s stats window)", "icc", {"stats_segment_len": MOVE_WIDE_STATS_S}),
+        ("iCanClean\n(30 s, scrambled ref)", "icc",
+         {"stats_segment_len": MOVE_WIDE_STATS_S, "scramble": True}),
     ]
 
     rows: list[dict[str, Any]] = [{
@@ -1439,16 +1449,21 @@ def prepare_movement(root: Path | None = None) -> None:
                 ridx = [work.ch_names.index(c) for c in ref_names]
                 data[ridx] = np.roll(data[ridx], shift, axis=1)
                 work = mne.io.RawArray(data, work.info, verbose="ERROR")
-            est = ICanClean(sfreq=sfreq, ref_channels=ref_names,
-                            primary_channels=eeg_names)
+            icc_kw = {"sfreq": sfreq, "ref_channels": ref_names,
+                      "primary_channels": eeg_names}
+            if opts.get("stats_segment_len"):
+                icc_kw["stats_segment_len"] = opts["stats_segment_len"]
+            est = ICanClean(**icc_kw)
             with _timed(f"{label.splitlines()[0]} fit_transform") as t:
                 out = est.fit_transform(work)
             removed = float(np.mean(est.n_removed_))
+            stats_len = opts.get("stats_segment_len") or est.segment_len
             extra = {
                 "n_windows": int(est.n_windows_),
                 "mean_r2": float(np.mean(est.correlations_)),
+                "stats_segment_len_s": float(stats_len),
                 "samples_per_dimension": float(
-                    est.segment_len * sfreq / (len(eeg_names) + len(ref_names))),
+                    stats_len * sfreq / (len(eeg_names) + len(ref_names))),
             }
 
         clean = out.copy().pick(eeg_names)
@@ -1534,12 +1549,237 @@ def prepare_movement(root: Path | None = None) -> None:
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+# Act 4 -- iCanClean against genuine EOG references (ERP CORE N170)
+# ---------------------------------------------------------------------------
+
+# Declared before any iCanClean result was inspected.
+EOG_SUBJECT = "sub-005"            # the Act 3 representative, chosen DSS-blind
+EOG_REFS = ("HEOG_left", "HEOG_right", "VEOG_lower")
+EOG_SHIFT_S = 97.0                 # negative control, matching the ds004505 design
+EOG_BLINK_TMIN, EOG_BLINK_TMAX = -0.5, 0.5
+EOG_BLINK_BASELINE = (-0.5, -0.3)
+EOG_ALPHA_BAND = (8.0, 13.0)
+EOG_FLANK_BANDS = ((5.0, 7.0), (18.0, 25.0))
+EOG_POSTERIOR = ("O1", "Oz", "O2", "PO3", "PO4", "PO7", "PO8",
+                 "P3", "P4", "P7", "P8", "Pz")
+
+
+def _eog_raw(data_root: Path):
+    """sub-005 with its EOG channels kept -- ``_n170_epochs`` drops them."""
+    import mne
+
+    raw = mne.io.read_raw_eeglab(
+        data_root / EOG_SUBJECT / "eeg" / f"{EOG_SUBJECT}_task-N170_eeg.set",
+        preload=True, verbose="ERROR")
+    raw.set_channel_types({c: "eog" for c in EOG_REFS if c in raw.ch_names},
+                          verbose="ERROR")
+    raw.set_montage("standard_1020", match_case=False, on_missing="warn",
+                    verbose="ERROR")
+    raw.filter(N170_HP, N170_LP, picks="all", verbose="ERROR")
+    raw.resample(N170_SFREQ, verbose="ERROR")
+    # EOGRegression refuses to fit without an average-reference projection, and
+    # both arms must share one baseline for the percentages to be comparable.
+    raw.set_eeg_reference("average", projection=True, verbose="ERROR")
+    return raw
+
+
+def _shift_refs(raw, ref_names, shift_s):
+    """Circularly shift only the reference channels -- the negative control."""
+    import mne
+
+    data = raw.get_data()
+    idx = [raw.ch_names.index(c) for c in ref_names]
+    data[idx] = np.roll(data[idx], round(shift_s * raw.info["sfreq"]), axis=1)
+    return mne.io.RawArray(data, raw.info.copy(), verbose="ERROR")
+
+
+def prepare_eog(root: Path | None = None) -> None:
+    """Act 4: iCanClean where the reference is real and the dimensions are sane."""
+    import mne
+    from mne.preprocessing import EOGRegression
+
+    from mne_denoise.icanclean import ICanClean
+
+    mne.set_log_level("ERROR")
+    log.info("[act 4] iCanClean -- ERP CORE N170 blinks vs genuine EOG references")
+
+    data_root = du.resolve_dataset_root("n170", root)
+    with _timed(f"read + preprocess {EOG_SUBJECT}"):
+        raw = _eog_raw(data_root)
+    eog_names = [c for c in raw.ch_names if c in EOG_REFS]
+    eeg_names = [c for c in raw.ch_names if c not in eog_names]
+    sfreq = float(raw.info["sfreq"])
+    posterior = [eeg_names.index(c) for c in EOG_POSTERIOR if c in eeg_names]
+    dims = len(eeg_names) + len(eog_names)
+    samples_per_dim = 2.0 * sfreq / dims
+    log.info("  %d EEG + %d EOG = %d dimensions; the 2 s default window gives "
+             "%.1f samples per dimension",
+             len(eeg_names), len(eog_names), dims, samples_per_dim)
+
+    blinks = mne.preprocessing.find_eog_events(raw, ch_name="VEOG_lower",
+                                               verbose="ERROR")
+    log.info("  %d blinks detected (%.1f/min over %.0f s)",
+             len(blinks), 60.0 * len(blinks) / raw.times[-1], raw.times[-1])
+
+    def _blink_evoked(inst):
+        ep = mne.Epochs(inst, blinks, tmin=EOG_BLINK_TMIN, tmax=EOG_BLINK_TMAX,
+                        baseline=EOG_BLINK_BASELINE, picks=eeg_names, preload=True,
+                        reject=None, proj=True, verbose="ERROR")
+        return ep.average()
+
+    def _psd(inst):
+        spec = inst.compute_psd(method="welch", fmin=1.0, fmax=45.0,
+                                n_fft=int(4 * sfreq), picks=eeg_names,
+                                verbose="ERROR")
+        return spec.freqs, spec.get_data()
+
+    evk0 = _blink_evoked(raw)
+    base_p2p = float(np.ptp(evk0.data, axis=1).mean()) * 1e6
+    # The channel mean of a blink under an average reference is ~zero (the
+    # pattern is dipolar), so the figure must show one channel, not the mean.
+    # Pick the channel the blink is largest on, before any cleaning.
+    worst = int(np.argmax(np.ptp(evk0.data, axis=1)))
+    log.info("  blink is largest on %s (%.1f uV peak-to-peak)",
+             eeg_names[worst], float(np.ptp(evk0.data[worst])) * 1e6)
+    freqs, psd0 = _psd(raw)
+    a_mask = (freqs >= EOG_ALPHA_BAND[0]) & (freqs <= EOG_ALPHA_BAND[1])
+    f_mask = np.zeros_like(a_mask)
+    for lo, hi in EOG_FLANK_BANDS:
+        f_mask |= (freqs >= lo) & (freqs <= hi)
+
+    def _alpha_db(psd1):
+        # Flank-normalised, so a uniform broadband gain change scores zero --
+        # the same guard the ds004505 arm uses.
+        band = 10.0 * np.log10(psd1[posterior][:, a_mask].mean(1)
+                               / psd0[posterior][:, a_mask].mean(1))
+        flank = 10.0 * np.log10(psd1[posterior][:, f_mask].mean(1)
+                                / psd0[posterior][:, f_mask].mean(1))
+        return float(np.median(band - flank))
+
+    log.info("  uncorrected blink-locked p2p %.2f uV (mean over %d EEG channels)",
+             base_p2p, len(eeg_names))
+
+    rows: list[dict[str, Any]] = [{
+        "method": "uncorrected", "blink_p2p_uv": base_p2p, "attenuation_pct": 0.0,
+        "alpha_vs_background_db": 0.0, "control": False,
+        "mean_r2": None, "components_removed": None, "runtime_s": None,
+    }]
+    traces: dict[str, Any] = {"times": evk0.times, "uncorrected": evk0.data}
+
+    specs = [
+        ("iCanClean", "icc", False),
+        ("iCanClean\n(shifted ref)", "icc", True),
+        ("EOG regression", "reg", False),
+        ("EOG regression\n(shifted ref)", "reg", True),
+    ]
+    for label, kind, control in specs:
+        work = _shift_refs(raw, eog_names, EOG_SHIFT_S) if control else raw.copy()
+        mean_r2 = n_removed = None
+        with _timed(f"{label.replace(chr(10), ' ')}") as t:
+            if kind == "icc":
+                est = ICanClean(sfreq=sfreq, ref_channels=eog_names,
+                                primary_channels=eeg_names)
+                out = est.fit_transform(work)
+                # correlations_ holds SQUARED canonical correlations despite the
+                # name, and n_removed_ is an array over windows.
+                mean_r2 = float(np.nanmean(est.correlations_))
+                n_removed = float(est.n_removed_.mean())
+            else:
+                out = EOGRegression(picks=eeg_names,
+                                    picks_artifact=eog_names).fit(work).apply(work.copy())
+        evk = _blink_evoked(out)
+        p2p = float(np.ptp(evk.data, axis=1).mean()) * 1e6
+        _, psd1 = _psd(out)
+        rows.append({
+            "method": label, "blink_p2p_uv": p2p,
+            "attenuation_pct": 100.0 * (1.0 - p2p / base_p2p),
+            "alpha_vs_background_db": _alpha_db(psd1), "control": control,
+            "mean_r2": mean_r2, "components_removed": n_removed,
+            "runtime_s": t.dt,
+        })
+        traces[label] = evk.data
+        log.info("  %-30s blink %6.2f uV (%+5.1f%%)   posterior alpha %+.3f dB",
+                 label.replace("\n", " "), p2p, rows[-1]["attenuation_pct"],
+                 rows[-1]["alpha_vs_background_db"])
+
+    if "iCanClean" in traces:
+        icc = next(r for r in rows if r["method"] == "iCanClean")
+        ctl = next(r for r in rows if r["method"].startswith("iCanClean\n"))
+        log.info("  control separation: %.1f pp attenuation, mean R2 %.3f vs %.3f",
+                 icc["attenuation_pct"] - ctl["attenuation_pct"],
+                 icc["mean_r2"], ctl["mean_r2"])
+
+    du.save_npz(du.cache_path("eog_traces.npz"), freqs=freqs, **traces)
+    du.save_json(du.cache_path("eog_metrics.json"), {
+        "subject": EOG_SUBJECT,
+        "n_eeg": len(eeg_names), "n_reference": len(eog_names),
+        "dimensions": dims, "samples_per_dimension": samples_per_dim,
+        "n_blinks": len(blinks),
+        "blinks_per_min": 60.0 * len(blinks) / float(raw.times[-1]),
+        "duration_s": float(raw.times[-1]),
+        "reference_channels": list(eog_names),
+        "posterior_roi": [eeg_names[i] for i in posterior],
+        "alpha_band_hz": list(EOG_ALPHA_BAND),
+        "flank_bands_hz": [list(b) for b in EOG_FLANK_BANDS],
+        "baseline_blink_p2p_uv": base_p2p,
+        "blink_channel": eeg_names[worst],
+        "blink_channel_index": worst,
+        "rows": rows,
+    })
+    du.write_manifest("eog", du.build_manifest(
+        act="eog",
+        dataset="n170",
+        subject=EOG_SUBJECT,
+        preprocessing={
+            "bandpass_hz": [N170_HP, N170_LP],
+            "resample_hz": N170_SFREQ,
+            "reference": "average (projection=True, required by EOGRegression)",
+            "eog_channels": list(EOG_REFS),
+        },
+        estimators={
+            "ICanClean": {
+                "ref_channels": list(EOG_REFS),
+                "params": "package defaults (segment_len=2.0, threshold=0.7)",
+                "samples_per_dimension": samples_per_dim,
+            },
+            "comparator": {
+                "name": "mne.preprocessing.EOGRegression",
+                "citation": "Gratton, Coles & Donchin (1983)",
+                "note": "same reference channels, same baseline, same control",
+            },
+            "negative_control": {
+                "construction": f"reference channels circularly shifted {EOG_SHIFT_S:.0f} s",
+                "rationale": "identical spectra, no true alignment to the scalp",
+            },
+            "endpoints": {
+                "attenuation": ("blink-locked evoked peak-to-peak, averaged over "
+                                "all EEG channels"),
+                "preservation": ("median posterior alpha change, flank-normalised "
+                                 "against 5-7 and 18-25 Hz"),
+            },
+        },
+        selection_rule=(
+            f"{EOG_SUBJECT} is the Act 3 representative, selected on baseline "
+            "evoked SNR before any estimator was run. No iCanClean output enters "
+            "the selection."
+        ),
+        notes=(
+            "n=1 participant. Blinks are a strong, physically real coupling with "
+            "dedicated reference electrodes, and 33 dimensions leave the CCA well "
+            "conditioned -- the opposite of the ds004505 regime in deep dive 03."
+        ),
+    ))
+    log.info("[act 4] done\n")
+
+
+# ---------------------------------------------------------------------------
 
 STAGES = {
     "zapline": prepare_zapline,
     "asr": prepare_asr,
     "asr-variants": prepare_asr_variants,
     "dss": prepare_dss,
+    "eog": prepare_eog,
     "movement": prepare_movement,
 }
 
@@ -1549,7 +1789,7 @@ def main(argv: list[str] | None = None) -> int:
         description="Prepare cached assets for the Meta sprint mne-denoise demo.",
     )
     parser.add_argument("--all", action="store_true", help="run every stage")
-    for stage in ("zapline", "asr", "asr-variants", "dss", "movement"):
+    for stage in ("zapline", "asr", "asr-variants", "dss", "eog", "movement"):
         parser.add_argument(f"--{stage}", action="store_true", help=f"run the {stage} stage")
     parser.add_argument("--ds003620-root", default=None, help="path to the ds003620 BIDS root")
     parser.add_argument("--n170-root", default=None, help="path to the ERP CORE N170 BIDS root")
@@ -1563,7 +1803,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if report["ok"] else 1
 
     requested = [
-        s for s in ("zapline", "asr", "asr-variants", "dss", "movement")
+        s for s in ("zapline", "asr", "asr-variants", "dss", "eog", "movement")
         if getattr(args, s.replace("-", "_"))
     ]
     if args.all or not requested:
@@ -1589,6 +1829,7 @@ _ROOT_ARG = {
     "asr": "ds003620",  # unused: the ASR fixture is synthetic
     "asr-variants": "ds003620",  # unused: fixture + the in-repo SME sample
     "dss": "n170",
+    "eog": "n170",
     "movement": "ds004505",
 }
 

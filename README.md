@@ -35,7 +35,7 @@ under fifteen seconds, mostly on synthetic data so nothing has to be downloaded.
 |---|---|---|
 | 01 | [ZapLine](deep_dives/01_zapline.ipynb) | notch vs fixed vs adaptive on a line that *moves*; what `adaptive_results_` records |
 | 02 | [ASR](deep_dives/02_asr.ipynb) | all four variants against known ground truth; where each looks for clean calibration data |
-| 03 | [iCanClean](deep_dives/03_icanclean.ipynb) | reference-based CCA — and the time-shifted control that tells you whether it worked |
+| 03 | [iCanClean](deep_dives/03_icanclean.ipynb) | reference-based CCA, the time-shifted control, and the ds004505 recording where the control comes back negative — and why |
 | 04 | [DSS](deep_dives/04_dss.ipynb) | two biases on identical data; why the stronger signal is not the one you get |
 | 05 | [Spectrum interpolation](deep_dives/05_spectrum_interpolation.ipynb) | phase-preserving line removal, and the rank it does not cost you |
 
@@ -133,7 +133,7 @@ No cell exceeds 3 s.
 | 2 — ASR | What did ASR detect, and what did it cost? | Artifact-interval RRMSE 0.492 → **0.160**. Artifact-free RRMSE 0.003 → **0.165** — a real cost. `calibration_info_` explains it: at 20 s the calibration has 27 samples per channel dimension and *both* endpoints get worse. |
 | 2b — ASR variants | Which of the four ASR variants does this recording need? | Robustness to a contaminated calibration comes from `cov_estimator`, not from `method=` — the threshold inflates **+20%** with `mean` and **+9%** with the default `geometric_median`, while `standard` and `riemannian_windowed` are numerically identical. On real mobile EEG the window selector is **not** starving (74%), so Juggler is not indicated. |
 | 3 — DSS | Why do I need this, when MNE already ships Xdawn and SSD? | Because the criterion is an argument. On one fixture with two planted sources, component 1 follows whatever is declared: PCA → the rhythm (\|cos\| **1.00**, it has more variance), `AverageBias` → the evoked source (**0.995**), `BandpassBias` → the rhythm (**0.999**). On real N170 data DSS does **not** win: it beats matched-rank PCA in 32/40 but `mne.decoding.XdawnTransformer` in only **15/40**, and plain PCA beats raw sensors in **40/40**. Reproducibility improves in 37/40, condition AUC in only 25/40. |
-| 4 — movement | Does attenuation mean the method worked? | iCanClean removes 11.5% of the scalp↔neck-EMG muscle coupling — and a reference time-shifted by 100 s removes **10.5%**. ASR/rASR at the shipped default are essentially inert here (0.03 components per window). |
+| 4 — iCanClean | Does attenuation mean the method worked? | On real blinks against real EOG electrodes, iCanClean removes **83.1%** of the blink and a reference shifted by 97 s removes **4.2%** — the control passing is what makes the number evidence. It beats `mne.preprocessing.EOGRegression` on both endpoints at once (73.0% removed, and −0.40 dB vs −1.19 dB of posterior alpha). Regression given the shifted reference removes **nothing** yet still costs 2.23 dB, because least squares always subtracts something. |
 
 ## F. Datasets
 
@@ -143,7 +143,8 @@ No cell exceeds 3 s.
 | 2 | Synthetic fixture, `_asr_fixture.py` | 32 ch, 250 Hz, known clean ground truth |
 | 2b | Same fixture + **SME `sme_1_1`**, the sample recording shipped with the rASR MATLAB reference | 24-ch Smarting mobile EEG, 250 Hz, first 120 s. In-repo at `refs/asr/repos/rASRMatlab/sampleData/filtered/` |
 | 3 | **ERP CORE N170** (`doi:10.18115/D5JW4R`) | all 40 participants, faces vs cars |
-| 4 | OpenNeuro **ds004505**, Table Tennis (`doi:10.18112/openneuro.ds004505.v1.0.2`) | 120 EEG + 120 dual-layer reference electrodes + 8 neck EMG, **sub-01 only** |
+| 4 | ERP CORE **N170** (`doi:10.18115/D5JW4R`) | 30 EEG + 3 EOG (HEOG left/right, VEOG lower), **sub-005 only** — the Act 3 representative |
+| deep dive 03 | OpenNeuro **ds004505**, Table Tennis (`doi:10.18112/openneuro.ds004505.v1.0.2`) | 120 EEG + 120 dual-layer reference electrodes + 8 neck EMG, **sub-01 only** |
 
 `ds000117` — the MEG M170 arm in the working draft — is not available offline
 here. ERP CORE N170 is its EEG homologue: the same face-perception construct,
@@ -341,7 +342,12 @@ These are real, reproduced, and **not worked around** in the demo.
   `BandpassBias` → alpha 0.999. Median held-out reproducibility: sensors 0.9675,
   PCA 0.9712, DSS 0.9747, **Xdawn 0.9787**. DSS beats PCA 32/40, Xdawn 15/40;
   PCA beats sensors 40/40. Reproducibility up 37/40; discriminability up 25/40.
-- Act 4 — real reference 11.5%, scrambled reference 10.5%
+- Act 4 — blink removed: iCanClean **83.1%**, EOG regression 73.0%, shifted-ref
+  control 4.2%. Posterior alpha: −0.40 dB vs −1.19 dB; regression's shifted
+  control removes 0.0% yet costs −2.23 dB. Mean R² 0.913 real vs 0.625 shifted.
+- deep dive 03 — ds004505 real reference 11.5%, scrambled 10.5%, at **2.08**
+  samples per dimension; widen to a 30 s stats window (31.2 samples/dim) and
+  mean R² falls 0.296 → 0.026 with **nothing** removed
 
 ### Likely questions
 
@@ -355,6 +361,14 @@ These are real, reproduced, and **not worked around** in the demo.
   non-linear contrast, `IterativeDSS` + `TanhMaskDenoiser` lands on FastICA's
   components at \|r\| = 1.000 / 0.999 / 0.895 / 0.894 — close, not identical, and
   FastICA recovered all four sources where DSS got three.
+- *"Why doesn't iCanClean work on ds004505?"* — It is not the method, it is the
+  operating point. 120 primary + 120 reference channels is 240 dimensions, and
+  the 2 s default window supplies 500 samples — **2.08 samples per dimension**.
+  A CCA that under-determined finds a "shared" subspace in noise; the scrambled
+  reference even scores a marginally *higher* mean R² (0.2966 vs 0.2959). Widen
+  the stats window to 30 s and the subspace evaporates (R² 0.026, nothing
+  removed). The real fix is to reduce reference dimensionality first. Deep dive
+  03 has the numbers.
 - *"Isn't rASR for sleep?"* — No; that's `dusk2dawn`. See the ASR family table.
 - *"Why doesn't rASR beat standard?"* — Because its robustness is already the
   default here. Show the `cov_estimator` panel.
