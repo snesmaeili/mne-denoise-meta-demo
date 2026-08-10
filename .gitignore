@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# Notebook execution artifacts
+_executed.ipynb
+.ipynb_checkpoints/
+
+# Test / tooling caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+
+# Prepared demo assets live in ~/.cache/mne-denoise/meta-demo, never in the repo.
+# Nothing here should ever contain raw OpenNeuro recordings.
+*.fif
+*.npz
+*.set
+*.fdt
+*.mat
