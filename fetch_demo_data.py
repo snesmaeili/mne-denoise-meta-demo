@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import demo_utils as du  # noqa: E402
 
-DATA_VERSION = "v1"
+DATA_VERSION = "v2"
 REPO = "snesmaeili/mne-denoise-meta-demo"
 ARCHIVE = f"demo-data-{DATA_VERSION}.zip"
 RELEASE_URL = f"https://github.com/{REPO}/releases/download/demo-data-{DATA_VERSION}/{ARCHIVE}"
@@ -35,7 +35,7 @@ RELEASE_URL = f"https://github.com/{REPO}/releases/download/demo-data-{DATA_VERS
 #: SHA-256 of the published archive, from package_demo_data.py. Pinned so the
 #: notebook six months from now runs on exactly the data shown at the talk.
 EXPECTED_SHA256: str | None = (
-    "a6d71bd478e8037ddb46383e8ec6cdb4b777dcedd55410f6d9fcb19198122882"
+    "63a427c75a828cb16566f78638e7b01eb41a93ee304efc1d03c496b9457c6e85"
 )
 
 RETRIES = 3

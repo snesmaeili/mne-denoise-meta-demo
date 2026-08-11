@@ -29,7 +29,7 @@ HERE = Path(__file__).resolve().parent
 DIST = HERE / "dist"
 
 #: Bump when the contents change in a way that would alter the talk.
-DATA_VERSION = "v1"
+DATA_VERSION = "v2"
 
 #: Files that ship inside the archive but are not demo assets.
 EXTRA_FILES = ("NOTICE.md",)
