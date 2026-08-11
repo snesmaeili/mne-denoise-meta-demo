@@ -41,8 +41,13 @@ under fifteen seconds, mostly on synthetic data so nothing has to be downloaded.
 
 ---
 
-A five-minute live demo for the MNE-Python maintainers sprint. Four acts, four
-artifact families, four information regimes, one estimator contract.
+A five-minute live demo for the MNE-Python maintainers sprint.
+**Different noise. Different assumptions. One MNE-native contract.**
+
+Four regimes on stage — periodic, transient, a target you declare, and
+reference-correlated. Everything else, including all four ASR variants and the
+DSS-versus-Xdawn comparison, is in the deep dives so the talk stays inside five
+minutes.
 
 Built against mne-denoise **`main` @ `f5b821c`** with mne 1.12.1, numpy 2.4.6,
 scipy 1.17.1, Python 3.14.
@@ -131,9 +136,16 @@ No cell exceeds 3 s.
 |---|---|---|
 | 1 — line noise | Can two methods remove the same 50 Hz peak at different cost? | R(50 Hz) 1.40 → notch **0.17** (a fifth of the surrounding floor) → ZapLine+ **1.00** (at the floor). ZapLine+ pays 0.087 dB of broadband distortion; the notch pays 0.0005 dB. |
 | 2 — ASR | What did ASR detect, and what did it cost? | Artifact-interval RRMSE 0.492 → **0.160**. Artifact-free RRMSE 0.003 → **0.165** — a real cost. `calibration_info_` explains it: at 20 s the calibration has 27 samples per channel dimension and *both* endpoints get worse. |
-| 2b — ASR variants | Which of the four ASR variants does this recording need? | Robustness to a contaminated calibration comes from `cov_estimator`, not from `method=` — the threshold inflates **+20%** with `mean` and **+9%** with the default `geometric_median`, while `standard` and `riemannian_windowed` are numerically identical. On real mobile EEG the window selector is **not** starving (74%), so Juggler is not indicated. |
-| 3 — DSS | Why do I need this, when MNE already ships Xdawn and SSD? | Because the criterion is an argument. On one fixture with two planted sources, component 1 follows whatever is declared: PCA → the rhythm (\|cos\| **1.00**, it has more variance), `AverageBias` → the evoked source (**0.995**), `BandpassBias` → the rhythm (**0.999**). On real N170 data DSS does **not** win: it beats matched-rank PCA in 32/40 but `mne.decoding.XdawnTransformer` in only **15/40**, and plain PCA beats raw sensors in **40/40**. Reproducibility improves in 37/40, condition AUC in only 25/40. |
-| 4 — blink removal | Does attenuation mean the method worked? | **No — the ordering is nearly reversed.** Six methods, ordered by what they are told. Blink removed / N170 effect (uncorrected −0.74 µV): iCanClean **83.1% / −1.43**, `EOGRegression` 73.0% / −1.15, DSS linear **95.9% / −0.56**, DSS non-linear 76.2% / −0.37, pseudo-reference notch **92.2% / +0.59** (sign inverted), pseudo-reference lowpass 89.8% / +0.36. The three biggest attenuators are the three worst results. |
+| 3 — DSS | Why do I need this, when MNE already ships Xdawn and SSD? | Because the criterion is an argument. On one fixture with two planted sources, component 1 follows whatever is declared: PCA → the rhythm (\|cos\| **1.00**, it has more variance), `AverageBias` → the evoked source (**0.995**), `BandpassBias` → the rhythm (**0.999**). *On stage this is one panel and one sentence.* |
+| 4 — blink removal | Does attenuation mean the method worked? | **No — the ordering is nearly reversed.** Blink removed / N170 effect (uncorrected −0.74 µV): iCanClean **83.1% / −1.43**, `EOGRegression` 73.0% / −1.15, pseudo-reference notch **92.2% / +0.59** (sign inverted). The arm that removes the most artifact destroys the effect. |
+
+### Measured, but held back for questions
+
+| Where | Result |
+|---|---|
+| deep dive 02 — ASR variants | Robustness to a contaminated calibration comes from `cov_estimator`, not `method=` — the threshold inflates **+20%** with `mean` and **+9%** with the default `geometric_median`, while `standard` and `riemannian_windowed` are numerically identical. On real mobile EEG the window selector is **not** starving (74%), so Juggler is not indicated. |
+| deep dive 04 — DSS head-to-head | DSS beats matched-rank PCA in 32/40 but `XdawnTransformer` in only **15/40**; plain PCA beats raw sensors in **40/40**. Reproducibility improves in 37/40, condition AUC in only 25/40. Xdawn is *not* a special case of DSS — mean principal-angle overlap 0.46. |
+| deep dive 03 — DSS on blinks | Same blinks, blink times only: DSS linear **95.9% / −0.56**, DSS non-linear 76.2% / −0.37. The non-linear arm spans −1.05 to −0.02 µV across six seeds; the linear one is a closed form and carries no spread. |
 
 ## F. Datasets
 

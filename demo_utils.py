@@ -474,15 +474,18 @@ def check_demo_assets(verbose: bool = True) -> dict[str, Any]:
         "import_error": import_err,
         "acts": acts,
         "repo_commit": commit,
+        "demo_commit": demo_commit(),
         "offline": True,  # nothing in the notebook performs I/O beyond the cache
         "ok": imports_ok and all(v["ok"] for v in acts.values()),
     }
 
     if verbose:
-        mark = "OK  " if report["ok"] else "FAIL"
         print(f"META DEMO {'READY' if report['ok'] else 'NOT READY'}")
-        print(f"  cache      {report['cache_dir']}")
-        print(f"  commit     {commit[:12]}")
+        print(f"  cache        {report['cache_dir']}")
+        # Two different repositories, so name them. A single unlabelled hash
+        # reads as one commit and hides which code produced the numbers.
+        print(f"  mne-denoise  {commit[:12]}")
+        print(f"  demo repo    {report['demo_commit'][:12]}")
         print(f"  {'[x]' if imports_ok else '[ ]'} package imports"
               + ("" if imports_ok else f"  -- {import_err}"))
         for asset in ASSETS:
@@ -494,8 +497,7 @@ def check_demo_assets(verbose: bool = True) -> dict[str, Any]:
             print(line)
         print(f"  [x] offline (no network required)")
         if not report["ok"]:
-            print("\n  Run:  python demo/meta_sprint_2026/prepare_meta_demo.py --all")
-        del mark
+            print("\n  Run:  python prepare_meta_demo.py --all")
     return report
 
 
@@ -880,23 +882,29 @@ def plot_dss_target_panel(
 
 def plot_dss_framework_panel(
     bias_swap: Mapping[str, Any],
-    head_to_head: Mapping[str, float],
+    head_to_head: Mapping[str, float] | None = None,
     *,
     group: Mapping[str, int] | None = None,
 ):
-    """Why DSS, in two panels.
+    """Why DSS.
 
     Left: the same estimator on the same data under three different criteria,
     scored against the two planted patterns. The distractor rhythm is the
     stronger source, so variance-maximisation returns it -- that is measured
     here, not asserted.
 
-    Right: the honest head-to-head on real evoked data against the comparators
-    that already exist, including the one MNE-Python ships for this job.
+    Right (only when ``head_to_head`` is given): the honest comparison on real
+    evoked data against the comparators that already exist, including the one
+    MNE-Python ships for this job. The live talk omits it for time; deep dive 04
+    has it.
     """
     import matplotlib.pyplot as plt
 
-    fig, axes = plt.subplots(1, 2, figsize=(15.5, 5.6))
+    if head_to_head is None:
+        fig, ax_swap = plt.subplots(figsize=(8.2, 5.6))
+        axes = [ax_swap]
+    else:
+        fig, axes = plt.subplots(1, 2, figsize=(15.5, 5.6))
 
     # ---- left: swap the criterion, same data ------------------------------
     ax = axes[0]
@@ -919,6 +927,10 @@ def plot_dss_framework_panel(
     ax.set_title("Same data, same estimator — one argument changed")
     ax.legend(frameon=False, loc="upper center", ncol=2, fontsize=12)
     _hide_spines(ax)
+
+    if head_to_head is None:
+        fig.tight_layout()
+        return fig
 
     # ---- right: the honest head-to-head -----------------------------------
     ax = axes[1]
@@ -1049,6 +1061,7 @@ def plot_icanclean_control_panel(
     *,
     channel: int = 0,
     channel_name: str = "",
+    only: Sequence[str] | None = None,
 ):
     """Attenuation against the science, so removing more cannot hide as success.
 
@@ -1057,8 +1070,16 @@ def plot_icanclean_control_panel(
     reference. Right: blink attenuation against the faces-vs-cars N170 effect.
     An arm that moves right while falling through zero removed the artifact by
     removing the brain.
+
+    ``only`` restricts the figure to a subset of arms without touching the
+    cache, so the live talk can show four while the record keeps all six.
     """
     import matplotlib.pyplot as plt
+
+    if only is not None:
+        keep = set(only)
+        rows = [r for r in rows if str(r["method"]) in keep]
+        traces = {k: v for k, v in traces.items() if k in keep}
 
     fig, axes = plt.subplots(1, 2, figsize=(16.0, 6.0))
     # Paired by family, because DEMO_COLORS["asr"] and ["dss"] are the same blue:

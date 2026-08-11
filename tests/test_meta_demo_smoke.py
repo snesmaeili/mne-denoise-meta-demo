@@ -338,6 +338,47 @@ def test_icanclean_control_panel_plots_every_arm():
     assert bottom > top
 
 
+def test_control_panel_only_filters_without_touching_the_cache():
+    """The stage shows four arms; the record keeps all six."""
+    times = np.linspace(-0.5, 0.5, 65)
+    blink = np.exp(-(times**2) / 0.004)
+    names = ["uncorrected", "iCanClean\n(EOG electrodes)", "EOG regression",
+             "DSS linear\n(CycleAverageBias)"]
+    traces = {n: np.tile(blink * 1e-4, (2, 1)) for n in names}
+    rows = [
+        {"method": n, "attenuation_pct": 10.0 * i, "n170_effect_uv": -0.5 - 0.1 * i,
+         "reference_kind": "recorded"} for i, n in enumerate(names)
+    ]
+    shown = names[:3]
+    with du.presentation_theme():
+        fig = du.plot_icanclean_control_panel(
+            times, traces, rows, channel=0, channel_name="FP2", only=shown)
+    assert len(fig.axes[1].collections) == len(shown)
+    # The left panel also draws a zero-line, so count labelled traces instead.
+    labelled = [ln for ln in fig.axes[0].get_lines()
+                if not ln.get_label().startswith("_")]
+    assert len(labelled) == len(shown)
+    assert "DSS linear" not in " ".join(ln.get_label() for ln in labelled)
+
+
+def test_dss_framework_panel_can_drop_the_head_to_head():
+    """Act 3 shows one panel; deep dive 04 shows both."""
+    bias_swap = {
+        "PCA": {"evoked": 0.07, "alpha": 1.00},
+        "AverageBias": {"evoked": 0.99, "alpha": 0.03},
+        "BandpassBias": {"evoked": 0.06, "alpha": 1.00},
+        "_amplitudes": {"evoked": 1.1, "alpha": 1.4},
+    }
+    with du.presentation_theme():
+        one = du.plot_dss_framework_panel(bias_swap)
+    assert len(one.axes) == 1
+    head = {"sensor_median": 0.9675, "pca_median": 0.9712,
+            "dss_median": 0.9747, "xdawn_median": 0.9787}
+    with du.presentation_theme():
+        two = du.plot_dss_framework_panel(bias_swap, head)
+    assert len(two.axes) == 2
+
+
 def test_eog_cache_shows_attenuation_and_science_disagree():
     """The act's whole argument: the best attenuation destroys the effect."""
     m = du.load_json(du.cache_path("eog_metrics.json"))

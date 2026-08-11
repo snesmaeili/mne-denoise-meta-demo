@@ -134,8 +134,9 @@ du.assert_presenter_ready()
 
 ```
 META DEMO READY
-  cache      C:\Users\s\.cache\mne-denoise\meta-demo
-  commit     0e3e08b7ed3b
+  cache        C:\Users\s\.cache\mne-denoise\meta-demo
+  mne-denoise  f5b821cc2a53
+  demo repo    70a764c46de2
   [x] package imports
   [x] ZapLine+ / line noise
   [x] ASR transient reconstruction
@@ -211,9 +212,10 @@ R = residual peak power / local spectral floor      (R = 1 means 'at the floor')
    zapline+   R = 1.00
 ```
 
-> **Say:** both remove the peak. The notch drives the residual to a fifth of the surrounding
-> floor — it removes signal that was never artifact. ZapLine+ lands on the floor because it
-> models the *spatial* line subspace instead of imposing a fixed spectral depth.
+> **Say:** both remove the peak. The difference is what else they touch. The notch suppresses
+> the whole band well below its surrounding spectral floor; ZapLine+ brings the peak back
+> *to* the floor by modelling the **spatial** line subspace instead of imposing a fixed
+> spectral depth.
 
 ```python
 if SHOW_DIAGNOSTICS:
@@ -291,178 +293,89 @@ Same estimator, same defaults, a 20 s recording instead of 60 s:
    artifact-free RRMSE      0.003 -> 0.318
 ```
 
-> **Say:** here we know the clean target, so we can price the cleaning. ASR found every
-> contaminated sample. It also touched data that needed nothing — and `calibration_info_`
-> tells us why: starve the calibration and both endpoints get worse together.
+> **Say:** here we know the clean target, so we can price the cleaning. ASR identified about
+> 98% of the contaminated samples. It also touched data that needed nothing — and
+> `calibration_info_` tells us why: starve the calibration and both endpoints get worse
+> together.
+>
+> The package ships four ASR variants for four calibration regimes. Choosing between them is
+> a whole conversation on its own — it is deep dive 02, and I am happy to open it in
+> questions.
 
-### The package ships four ASR variants. Which one does *this* recording need?
+---
+## 3 — Sometimes the goal is not to remove noise, but to keep a structure you can name
+
+DSS maximises a ratio you *declare*: $\max_w \; w^{\top} R_{\text{biased}} w \,/\, w^{\top} R_{\text{baseline}} w$. PCA, Xdawn, SSD and CSP are all this problem with $R_{\text{biased}}$ **frozen**. DSS leaves it as an argument.
 
 ```python
-V = du.load_json(du.cache_path("asr_variants_metrics.json"))
-a, b = V["arm_a_contaminated_calibration"], V["arm_b_calibration_supply"]
+# One fixture, two planted sources, three criteria. DSS fits in a fraction of a
+# second, so the estimator call runs live.
+from mne_denoise.dss import DSS, AverageBias
 
+d = du.load_json(du.cache_path("dss_metrics.json"))
+epochs = mne.read_epochs(du.cache_path("dss_demo-epo.fif"), preload=True, verbose="ERROR")
+
+if LIVE:
+    dss = DSS(bias=AverageBias(axis="epochs"), n_select="auto")
+    dss.fit(epochs)
+    print(f"DSS on {len(epochs)} real trials: kept {dss.n_selected_} components, "
+          f"leading bias scores {np.round(dss.eigenvalues_[:3], 3)}")
+
+b = d["bias_swap"]
 with du.presentation_theme():
-    fig = du.plot_asr_variant_regimes(a, b)
+    fig = du.plot_dss_framework_panel(b)
 plt.show()
 
-print(f"method='standard' and method='riemannian_windowed' give identical results here: "
-      f"{a['methods_identical']}")
-print(f"   because both already default to cov_estimator='geometric_median'")
-print(f"\n{b['dataset']}")
-for r in b["rows"]:
-    print(f"   {r['variant']:<15s} calibrates on {100 * r['calibration_fraction']:5.1f}% "
-          f"of the recording ({r['calibration_kind']}-based), {r['runtime_s']:.1f} s")
+amp = b["_amplitudes"]
+print(f"planted: evoked at {amp['evoked']}, alpha at {amp['alpha']} — "
+      f"the distractor is the stronger source")
+for name in ("PCA", "AverageBias", "BandpassBias"):
+    print(f"   {name:<13s} evoked {b[name]['evoked']:.3f}    alpha {b[name]['alpha']:.3f}")
 ```
 
 *[1 figure(s) rendered here — omitted from this text export]*
 
 ```
-method='standard' and method='riemannian_windowed' give identical results here: True
-   because both already default to cov_estimator='geometric_median'
-
-SME sme_1_1 (Blum et al. 2019 rASR sample, Smarting mobile EEG)
-   standard        calibrates on  73.8% of the recording (window-based), 2.0 s
-   rASR            calibrates on  73.8% of the recording (window-based), 2.0 s
-   juggler-gev     calibrates on  23.8% of the recording (sample-based), 1.6 s
-   juggler-dbscan  calibrates on  65.9% of the recording (sample-based), 13.2 s
-```
-
-> **Say:** Blum's Riemannian robustness is real — you can see the dirty-calibration
-> threshold inflate twice as much without it. But in this package it is already the
-> default for every variant, so the `method=` flag changes nothing. And on this
-> recording the window selector is not starving, so Juggler is not indicated. The
-> fitted state answers "which variant" before you have to guess.
-
----
-## 3 — Why do I need this, when MNE already ships Xdawn and SSD?
-
-DSS maximises a ratio you *declare*:
-
-$$\max_w \; \frac{w^{\top} R_{\text{biased}}\, w}{w^{\top} R_{\text{baseline}}\, w}$$
-
-PCA, Xdawn, SSD and CSP are all this same problem with $R_{\text{biased}}$ **frozen** at one choice. DSS leaves it as an argument.
-
-*A synthetic fixture with two planted sources, then ERP CORE N170, faces vs cars, 40 participants.*
-
-```python
-# DSS fits in a fraction of a second, so this one runs live.
-from mne_denoise.dss import DSS, AverageBias
-
-epochs = mne.read_epochs(du.cache_path("dss_demo-epo.fif"), preload=True, verbose="ERROR")
-d = du.load_json(du.cache_path("dss_metrics.json"))
-
-print(f"{len(epochs)} trials, {len(epochs.ch_names)} channels")
-if LIVE:
-    dss = DSS(bias=AverageBias(axis="epochs"), n_select="auto")
-    dss.fit(epochs)
-    print(f"DSS kept {dss.n_selected_} components; "
-          f"leading bias scores {np.round(dss.eigenvalues_[:4], 3)}")
-else:
-    print(f"(cached) DSS kept {d['n_selected']} components; "
-          f"leading bias scores {np.round(d['eigenvalues'][:4], 3)}")
-
-# One fixture, two planted sources, three criteria. The 10 Hz rhythm is the
-# STRONGER source by declaration, so variance-maximisation should return it.
-b = d["bias_swap"]
-amp = b["_amplitudes"]
-print(f"\nplanted: evoked at amplitude {amp['evoked']}, alpha at {amp['alpha']} "
-      f"(the distractor is stronger)")
-print("|cos| of component 1 against each planted pattern:")
-for name in ("PCA", "AverageBias", "BandpassBias"):
-    print(f"   {name:<13s} evoked {b[name]['evoked']:.3f}    alpha {b[name]['alpha']:.3f}")
-```
-
-```
-160 trials, 30 channels
-DSS kept 8 components; leading bias scores [0.577 0.422 0.14  0.077]
-
-planted: evoked at amplitude 1.1, alpha at 1.4 (the distractor is stronger)
-|cos| of component 1 against each planted pattern:
+DSS on 160 real trials: kept 8 components, leading bias scores [0.577 0.422 0.14 ]
+planted: evoked at 1.1, alpha at 1.4 — the distractor is the stronger source
    PCA           evoked 0.069    alpha 1.000
    AverageBias   evoked 0.995    alpha 0.025
    BandpassBias  evoked 0.060    alpha 0.999
 ```
 
-```python
-G = du.load_json(du.cache_path("dss_group.json"))
-g = G["summary"]
-r = d["reproducibility"]
-
-with du.presentation_theme():
-    fig = du.plot_dss_framework_panel(b, r, group=g)
-plt.show()
-
-print("median split-half reproducibility, evaluated on held-out trials:")
-for key, label in (("sensor", "raw sensors"), ("pca", "PCA, matched rank"),
-                   ("dss", "DSS AverageBias"), ("xdawn", "Xdawn (already in MNE)")):
-    print(f"   {label:<24s} {r[f'{key}_median']:.4f}")
-
-print(f"\nAcross all {g['n_subjects']} participants:")
-print(f"   reproducibility improved in    {g['reproducibility_gain_positive']}/{g['n_subjects']}")
-print(f"   discriminability improved in   {g['auc_change_positive']}/{g['n_subjects']}")
-print(f"   DSS beat matched-rank PCA in   {g['dss_over_pca_positive']}/{g['n_subjects']}")
-print(f"   DSS beat Xdawn in              {g['dss_over_xdawn_positive']}/{g['n_subjects']}")
-print(f"   plain PCA beat raw sensors in  {g['pca_over_sensor_positive']}/{g['n_subjects']}")
-```
-
-*[1 figure(s) rendered here — omitted from this text export]*
-
-```
-median split-half reproducibility, evaluated on held-out trials:
-   raw sensors              0.9675
-   PCA, matched rank        0.9712
-   DSS AverageBias          0.9747
-   Xdawn (already in MNE)   0.9787
-
-Across all 40 participants:
-   reproducibility improved in    37/40
-   discriminability improved in   25/40
-   DSS beat matched-rank PCA in   32/40
-   DSS beat Xdawn in              15/40
-   plain PCA beat raw sensors in  40/40
-```
-
-> **Say:** take the right-hand panel first, because it is the one that argues against me.
-> At enhancing an evoked response, DSS does *not* beat Xdawn — Xdawn wins in 25 of 40
-> participants. Plain PCA beats raw sensors in all 40. If "concentrate the evoked response"
-> is your whole problem, MNE already solved it and you do not need this.
+> **Say:** same data, same estimator, one argument changed — and the answer moves from the
+> evoked source to the rhythm. PCA returns the rhythm too, because the rhythm has more
+> variance; it has no way to be *asked* for anything else. Xdawn cannot become SSD.
 >
-> The argument is the left panel. Same fixture, same estimator, one argument changed — and
-> the answer moves from the evoked source to the rhythm. PCA returns the rhythm too, because
-> the rhythm has more variance; it has no way to be asked for anything else. Xdawn cannot
-> become SSD. That is what you are buying: the criterion is a parameter, not a fixed part of
-> the algorithm.
->
-> And the caution stands — reproducibility improved in 37 of 40, condition discriminability
-> in only 25. Declaring the target is not the same as getting the science for free.
+> On real N170 data DSS does not beat Xdawn at this — that comparison, and the 40-participant
+> result, are in deep dive 04.
 
 ```python
 if SHOW_DIAGNOSTICS:
-    # The per-participant view behind the 37/40 and 25/40 counts: every subject
-    # is one dot, reproducibility gain against condition-AUC change.
-    D = du.load_npz(du.cache_path("dss_sources.npz"))
-    per = G["per_subject"]
+    # The head-to-head that is cut from the live path: DSS against the tools
+    # that already exist, on real N170 data, plus the 40-participant counts.
+    G = du.load_json(du.cache_path("dss_group.json"))
+    g, per = G["summary"], G["per_subject"]
+    r = d["reproducibility"]
+
     with du.presentation_theme():
-        fig = du.plot_dss_target_panel(
-            D["times"],
-            du.zscore_rows(D["sensor_half_a"]), du.zscore_rows(D["sensor_half_b"]),
-            du.zscore_rows(D["component_half_a"]), du.zscore_rows(D["component_half_b"]),
-            group={
-                "reproducibility_gain": [v["r_dss"] - v["r_sensor"] for v in per.values()],
-                "auc_change": [v["auc_dss"] - v["auc_sensor"] for v in per.values()],
-            },
-            labels={"sensor": f"sensor {d['best_channel']}", "dss": "DSS component 1"},
-            window=tuple(d["n170_window_s"]),
-            pattern=D["pattern"], info=epochs.info,
-        )
+        fig = du.plot_dss_framework_panel(b, r, group=g)
     plt.show()
 
+    print("median split-half reproducibility, held out:")
+    for key, label in (("sensor", "raw sensors"), ("pca", "PCA, matched rank"),
+                       ("dss", "DSS AverageBias"), ("xdawn", "Xdawn (already in MNE)")):
+        print(f"   {label:<24s} {r[f'{key}_median']:.4f}")
+    print(f"\nAcross all {g['n_subjects']} participants:")
+    print(f"   reproducibility improved in   {g['reproducibility_gain_positive']}/{g['n_subjects']}")
+    print(f"   discriminability improved in  {g['auc_change_positive']}/{g['n_subjects']}")
+    print(f"   DSS beat Xdawn in             {g['dss_over_xdawn_positive']}/{g['n_subjects']}")
+    print(f"   plain PCA beat raw sensors in {g['pca_over_sensor_positive']}/{g['n_subjects']}")
+
     ov = d["subspace_overlap_dss_xdawn"]
-    print("DSS vs Xdawn, principal-angle cosines (1.0 = same direction):")
-    print(f"   {np.round(ov, 3).tolist()}")
-    print(f"   mean {np.mean(ov):.3f} -- the leading direction agrees, the rest does not.")
-    print("   So Xdawn is NOT a special case of DSS as implemented; it is a different")
-    print("   fixed choice of the same kind of criterion.")
+    print(f"\nDSS vs Xdawn principal-angle cosines: {np.round(ov, 3).tolist()}")
+    print(f"   mean {np.mean(ov):.3f} — the leading direction agrees, the rest does not,")
+    print("   so Xdawn is NOT a special case of DSS as implemented.")
 ```
 
 ---
@@ -475,70 +388,59 @@ Six methods, ordered by how much they are told. **The EOG waveform:** iCanClean,
 ```python
 E = du.load_json(du.cache_path("eog_metrics.json"))
 T = du.load_npz(du.cache_path("eog_traces.npz"))
-order = [r["method"] for r in E["rows"]]
+
+# Four arms on stage. The two DSS blink arms are measured and cached too --
+# they are in deep dive 03, because they open a second idea mid-act.
+SHOWN = ["uncorrected", "EOG regression", "iCanClean\n(EOG electrodes)",
+         "pseudo-reference\n(notch 8-30 Hz)"]
 
 with du.presentation_theme():
     fig = du.plot_icanclean_control_panel(
-        T["times"], {k: T[k] for k in order}, E["rows"],
+        T["times"], {k: T[k] for k in SHOWN}, E["rows"],
         channel=E["blink_channel_index"], channel_name=E["blink_channel"],
+        only=SHOWN,
     )
 plt.show()
 
-print(f"{E['n_blinks']} blinks over {E['duration_s']:.0f} s. Before any cleaning the "
-      f"faces-vs-cars N170 at {'/'.join(E['n170_roi'])} is "
-      f"{E['baseline_n170_effect_uv']:+.2f} µV.\n")
-print(f"{'arm':<38s} {'sees':<15s} {'blink removed':>13s} {'N170':>10s}")
-for r in E["rows"][1:]:
-    print(f"{r['method'].replace(chr(10), ' '):<38s} {r['information']:<15s} "
+print(f"{E['n_blinks']} blinks. Before cleaning, the faces-vs-cars N170 at "
+      f"{'/'.join(E['n170_roi'])} is {E['baseline_n170_effect_uv']:+.2f} µV.\n")
+print(f"{'arm':<34s} {'sees':<15s} {'blink removed':>13s} {'N170':>10s}")
+for r in E["rows"]:
+    if r["method"] not in SHOWN or r["method"] == "uncorrected":
+        continue
+    print(f"{r['method'].replace(chr(10), ' '):<34s} {r['information']:<15s} "
           f"{r['attenuation_pct']:12.1f}% {r['n170_effect_uv']:+9.2f} µV")
-
-s = next(r["seed_spread"] for r in E["rows"] if "seed_spread" in r)
-eff = np.array(s["n170_effect_uv"])
-print(f"\nThe non-linear route is a fixed-point iteration, so it has no single answer. "
-      f"Over {len(s['seeds'])} seeds its N170 ranges {eff.min():+.2f} to {eff.max():+.2f} µV "
-      f"(reporting seed {s['reported_seed']}, the median).")
-print("Linear DSS is a closed-form eigendecomposition and returns the same answer every time.")
 ```
 
 *[1 figure(s) rendered here — omitted from this text export]*
 
 ```
-593 blinks over 589 s. Before any cleaning the faces-vs-cars N170 at PO7/PO8 is -0.74 µV.
+593 blinks. Before cleaning, the faces-vs-cars N170 at PO7/PO8 is -0.74 µV.
 
-arm                                    sees            blink removed       N170
-iCanClean (EOG electrodes)             EOG waveform            83.1%     -1.43 µV
-EOG regression                         EOG waveform            73.0%     -1.15 µV
-DSS linear (CycleAverageBias)          blink times             95.9%     -0.56 µV
-DSS non-linear (IterativeDSS + tanh)   blink times             76.2%     -0.37 µV
-pseudo-reference (notch 8-30 Hz)       the EEG itself          92.2%     +0.59 µV
-pseudo-reference (lowpass 5 Hz)        the EEG itself          89.8%     +0.36 µV
-
-The non-linear route is a fixed-point iteration, so it has no single answer. Over 6 seeds its N170 ranges -1.05 to -0.02 µV (reporting seed 2, the median).
-Linear DSS is a closed-form eigendecomposition and returns the same answer every time.
+arm                                sees            blink removed       N170
+iCanClean (EOG electrodes)         EOG waveform            83.1%     -1.43 µV
+EOG regression                     EOG waveform            73.0%     -1.15 µV
+pseudo-reference (notch 8-30 Hz)   the EEG itself          92.2%     +0.59 µV
 ```
 
-> **Say:** read the right panel by column, not by row. Everything to the right removed more
-> blink. Everything above the orange line kept the science. Those are not the same ordering —
-> they are almost the reverse of each other.
+> **Say:** the pseudo-reference is the appealing one — no electrodes at all, you notch the
+> brain band out of the EEG and use that as the reference. And it wins on attenuation: 92%
+> of the blink, against 83% for the recorded EOG electrodes.
 >
-> The three biggest attenuators are the three worst results. Linear DSS takes 96% off the
-> blink and *weakens* the N170. The pseudo-reference takes 92% off without needing a single
-> electrode, and comes back with the **wrong sign** — the effect is gone, because a reference
-> built by filtering the EEG shares the signal's own low frequencies, and the N170 lives
-> there. The winner is iCanClean at 83%, which is not the top of the attenuation column.
+> It also destroys the experiment. The faces-versus-cars N170 is a *negative* deflection.
+> With the recorded electrodes it goes from −0.74 to −1.43 µV — removing blink noise sharpens
+> it. With the pseudo-reference it comes back **positive**. The effect is not weakened, it is
+> gone, because a reference built by filtering the EEG shares the signal's own low
+> frequencies, and the N170 lives there.
 >
-> And the two DSS arms are the same estimator on the same information — blink times, never
-> the EOG waveform. All that changed is whether the criterion is a fixed covariance or one
-> re-estimated at every iteration. The linear one is a closed-form eigendecomposition, so it
-> gives the same answer every time. The non-linear one is a fixed-point iteration: across six
-> seeds its N170 lands anywhere from −1.05 to −0.02. That error bar is the honest result.
->
-> One participant. If you take one thing: attenuation is not a score.
+> On this participant, iCanClean removed substantial blink contamination while retaining the
+> expected N170; the arms with the largest attenuation did not. So:
+> **artifact attenuation is not a score.**
 
 ---
-## 5 — You have seen two of these. The same contract covers the rest.
+## 5 — You have seen four regimes. The same contract covers the rest.
 
-| Contamination structure | Method | What information it uses |
+| What you have | Method | What information it uses |
 |---|---|---|
 | power-line noise, possibly non-stationary | **ZapLine / ZapLine+** | narrowband spatial structure at the line frequency |
 | line noise, conservative + phase-preserving | **SpectrumInterpolation** | the spectral neighbourhood of the peak |
@@ -556,8 +458,43 @@ plt.show()
 *[1 figure(s) rendered here — omitted from this text export]*
 
 > **Say:** different assumptions, different information, different failure modes — but one
-> MNE-native estimator contract, and in every case the fitted object is the thing that let us
-> check the claim.
+> MNE-native estimator contract. MNE objects in, MNE objects out, and in every case the
+> fitted object is the thing that let us check the claim.
+
+---
+
+```python
+ZapLine(...).fit_transform(raw)
+ASR(...).fit_transform(raw)
+ICanClean(...).fit_transform(raw)
+DSS(bias=...).fit_transform(epochs)
+```
+
+## Run exactly what I just ran
+
+```python
+from IPython.display import Image, display
+
+# The QR opens this exact notebook in Colab. Regenerate with make_qr.py if the
+# repository ever moves.
+display(Image(filename="qr_colab.png", width=300))
+print("  https://colab.research.google.com/github/snesmaeili/mne-denoise-meta-demo")
+print("  package:  github.com/mne-tools/mne-denoise")
+print()
+print("  5 deep dives in this repo cover every method and every control cut for time:")
+print("     01 ZapLine   02 ASR (all four variants)   03 iCanClean   04 DSS   "
+      "05 SpectrumInterpolation")
+```
+
+*[1 figure(s) rendered here — omitted from this text export]*
+
+```
+  https://colab.research.google.com/github/snesmaeili/mne-denoise-meta-demo
+  package:  github.com/mne-tools/mne-denoise
+
+  5 deep dives in this repo cover every method and every control cut for time:
+     01 ZapLine   02 ASR (all four variants)   03 iCanClean   04 DSS   05 SpectrumInterpolation
+```
 
 ---
 ---
