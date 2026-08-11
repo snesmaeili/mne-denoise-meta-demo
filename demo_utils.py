@@ -1060,14 +1060,20 @@ def plot_icanclean_control_panel(
     """
     import matplotlib.pyplot as plt
 
-    fig, axes = plt.subplots(1, 2, figsize=(15.5, 5.8))
+    fig, axes = plt.subplots(1, 2, figsize=(16.0, 6.0))
+    # Paired by family, because DEMO_COLORS["asr"] and ["dss"] are the same blue:
+    # recorded reference = green/blue, DSS = violets, pseudo-reference = oranges.
     style = {
         "uncorrected": (DEMO_COLORS["original"], "-", 2.6),
         "iCanClean\n(EOG electrodes)": (DEMO_COLORS["icanclean"], "-", 2.6),
         "EOG regression": (DEMO_COLORS["asr"], "-", 2.2),
+        "DSS linear\n(CycleAverageBias)": ("#785EF0", "-", 2.2),
+        "DSS non-linear\n(IterativeDSS + tanh)": ("#B18DE8", "-.", 2.0),
         "pseudo-reference\n(notch 8-30 Hz)": (DEMO_COLORS["warning"], "--", 2.2),
-        "pseudo-reference\n(lowpass 5 Hz)": (DEMO_COLORS["notch"], "--", 1.8),
+        "pseudo-reference\n(lowpass 5 Hz)": (DEMO_COLORS["zapline"], "--", 1.8),
     }
+    # Marker encodes what information the method was given.
+    marker = {"none": "o", "recorded": "o", "event-locked": "s", "pseudo": "D"}
 
     # ---- left: the blink itself -------------------------------------------
     ax = axes[0]
@@ -1092,10 +1098,22 @@ def plot_icanclean_control_panel(
     for row in rows:
         name = str(row["method"])
         colour = style.get(name, (DEMO_COLORS["floor"],))[0]
-        pseudo = row.get("reference_kind") == "pseudo"
+        kind = row.get("reference_kind", "none")
+        pseudo = kind == "pseudo"
         x = 0.0 if name == "uncorrected" else float(row["attenuation_pct"])
         y = float(row["n170_effect_uv"])
-        ax.scatter(x, y, s=260, color="white" if pseudo else colour,
+        # An iterative method has no single answer -- show the spread it has.
+        spread = row.get("seed_spread")
+        if spread:
+            sx = np.asarray(spread["attenuation_pct"], dtype=float)
+            sy = np.asarray(spread["n170_effect_uv"], dtype=float)
+            ax.errorbar(sx.mean(), sy.mean(),
+                        xerr=[[sx.mean() - sx.min()], [sx.max() - sx.mean()]],
+                        yerr=[[sy.mean() - sy.min()], [sy.max() - sy.mean()]],
+                        fmt="none", ecolor=colour, elinewidth=2.0, capsize=5,
+                        alpha=0.8, zorder=2)
+        ax.scatter(x, y, s=260, marker=marker.get(kind, "o"),
+                   color="white" if pseudo else colour,
                    edgecolor=colour, linewidth=2.6, zorder=3,
                    hatch="///" if pseudo else None)
         # Label away from the right edge, and never on top of a neighbour.

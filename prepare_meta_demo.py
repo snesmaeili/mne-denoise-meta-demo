@@ -1557,10 +1557,14 @@ EOG_SUBJECT = "sub-005"            # the Act 3 representative, chosen DSS-blind
 EOG_REFS = ("HEOG_left", "HEOG_right", "VEOG_lower")
 EOG_BLINK_TMIN, EOG_BLINK_TMAX = -0.5, 0.5
 EOG_BLINK_BASELINE = (-0.5, -0.3)
-EOG_ALPHA_BAND = (8.0, 13.0)
-EOG_FLANK_BANDS = ((5.0, 7.0), (18.0, 25.0))
-EOG_POSTERIOR = ("O1", "Oz", "O2", "PO3", "PO4", "PO7", "PO8",
-                 "P3", "P4", "P7", "P8", "Pz")
+#: Window around each blink for CycleAverageBias, in seconds. A blink lasts
+#: 200-400 ms; this brackets it. Declared from the physiology, not swept.
+EOG_DSS_WINDOW_S = (-0.2, 0.4)
+#: Linear DSS is a closed-form eigendecomposition and returns the same answer
+#: every time. IterativeDSS is a fixed-point iteration started from a random
+#: init, so it does not -- these seeds are run and the spread is reported
+#: rather than one of them being picked.
+EOG_DSS_SEEDS = (0, 1, 2, 7, 42, 97)
 #: The N170 is measured at these sites in the ERP CORE reference implementation.
 EOG_N170_ROI = ("PO7", "PO8")
 #: Pseudo-reference filters. iCanClean's original MATLAB mode built the CCA
@@ -1619,6 +1623,12 @@ def prepare_eog(root: Path | None = None) -> None:
     import mne
     from mne.preprocessing import EOGRegression
 
+    from mne_denoise.dss import (
+        DSS,
+        CycleAverageBias,
+        IterativeDSS,
+        TanhMaskDenoiser,
+    )
     from mne_denoise.icanclean import ICanClean
 
     mne.set_log_level("ERROR")
@@ -1630,7 +1640,6 @@ def prepare_eog(root: Path | None = None) -> None:
     eog_names = [c for c in raw.ch_names if c in EOG_REFS]
     eeg_names = [c for c in raw.ch_names if c not in eog_names]
     sfreq = float(raw.info["sfreq"])
-    posterior = [eeg_names.index(c) for c in EOG_POSTERIOR if c in eeg_names]
     dims = len(eeg_names) + len(eog_names)
     samples_per_dim = 2.0 * sfreq / dims
     log.info("  %d EEG + %d EOG = %d dimensions; the 2 s default window gives "
@@ -1678,12 +1687,6 @@ def prepare_eog(root: Path | None = None) -> None:
                         reject=None, proj=True, verbose="ERROR")
         return ep.average()
 
-    def _psd(inst):
-        spec = inst.compute_psd(method="welch", fmin=1.0, fmax=45.0,
-                                n_fft=int(4 * sfreq), picks=eeg_names,
-                                verbose="ERROR")
-        return spec.freqs, spec.get_data()
-
     evk0 = _blink_evoked(raw)
     base_p2p = float(np.ptp(evk0.data, axis=1).mean()) * 1e6
     # The channel mean of a blink under an average reference is ~zero (the
@@ -1692,21 +1695,6 @@ def prepare_eog(root: Path | None = None) -> None:
     worst = int(np.argmax(np.ptp(evk0.data, axis=1)))
     log.info("  blink is largest on %s (%.1f uV peak-to-peak)",
              eeg_names[worst], float(np.ptp(evk0.data[worst])) * 1e6)
-    freqs, psd0 = _psd(raw)
-    a_mask = (freqs >= EOG_ALPHA_BAND[0]) & (freqs <= EOG_ALPHA_BAND[1])
-    f_mask = np.zeros_like(a_mask)
-    for lo, hi in EOG_FLANK_BANDS:
-        f_mask |= (freqs >= lo) & (freqs <= hi)
-
-    def _alpha_db(psd1):
-        # Flank-normalised, so a uniform broadband gain change scores zero --
-        # the same guard the ds004505 arm uses.
-        band = 10.0 * np.log10(psd1[posterior][:, a_mask].mean(1)
-                               / psd0[posterior][:, a_mask].mean(1))
-        flank = 10.0 * np.log10(psd1[posterior][:, f_mask].mean(1)
-                                / psd0[posterior][:, f_mask].mean(1))
-        return float(np.median(band - flank))
-
     log.info("  uncorrected blink-locked p2p %.2f uV (mean over %d EEG channels)",
              base_p2p, len(eeg_names))
 
@@ -1716,60 +1704,131 @@ def prepare_eog(root: Path | None = None) -> None:
 
     rows: list[dict[str, Any]] = [{
         "method": "uncorrected", "blink_p2p_uv": base_p2p, "attenuation_pct": 0.0,
-        "alpha_vs_background_db": 0.0, "n170_effect_uv": base_effect,
-        "n170_effect_pct": 100.0, "reference_kind": "none",
-        "mean_r2": None, "components_removed": None, "runtime_s": None,
+        "n170_effect_uv": base_effect, "n170_effect_pct": 100.0,
+        "information": "none", "reference_kind": "none",
+        "components_removed": None, "runtime_s": None,
     }]
     traces: dict[str, Any] = {"times": evk0.times, "uncorrected": evk0.data}
 
-    def _record(label, out, kind, est=None, runtime=None):
+    def _record(label, out, information, kind, removed=None, runtime=None):
         evk = _blink_evoked(out)
         p2p = float(np.ptp(evk.data, axis=1).mean()) * 1e6
-        _, psd1 = _psd(out)
         effect = _n170_effect(out)
         rows.append({
             "method": label, "blink_p2p_uv": p2p,
             "attenuation_pct": 100.0 * (1.0 - p2p / base_p2p),
-            "alpha_vs_background_db": _alpha_db(psd1),
             "n170_effect_uv": effect,
             "n170_effect_pct": 100.0 * effect / base_effect,
-            "reference_kind": kind,
-            # correlations_ holds SQUARED canonical correlations despite the
-            # name, and n_removed_ is an array over windows.
-            "mean_r2": None if est is None else float(np.nanmean(est.correlations_)),
-            "components_removed": None if est is None else float(est.n_removed_.mean()),
-            "runtime_s": runtime,
+            "information": information, "reference_kind": kind,
+            "components_removed": removed, "runtime_s": runtime,
         })
         traces[label] = evk.data
-        log.info("  %-32s blink %6.2f uV (%+5.1f%%) | N170 effect %+.3f uV "
-                 "(%+4.0f%%) | alpha %+.2f dB",
-                 label.replace("\n", " "), p2p, rows[-1]["attenuation_pct"],
-                 effect, rows[-1]["n170_effect_pct"],
-                 rows[-1]["alpha_vs_background_db"])
+        log.info("  %-34s %-14s blink %6.2f uV (%+5.1f%%) | N170 %+.3f uV",
+                 label.replace("\n", " "), information, p2p,
+                 rows[-1]["attenuation_pct"], effect)
 
-    # 1. Dedicated electrodes -- the reference actually recorded the artifact.
-    with _timed("iCanClean (real EOG reference)") as t:
+    scalp = raw.copy().pick(eeg_names)
+
+    # -- tier 1: the method is handed the recorded EOG waveform ---------------
+    with _timed("iCanClean (EOG electrodes)") as t:
         est = ICanClean(sfreq=sfreq, ref_channels=eog_names,
                         primary_channels=eeg_names)
         out = est.fit_transform(raw.copy())
-    _record("iCanClean\n(EOG electrodes)", out, "recorded", est, t.dt)
+    _record("iCanClean\n(EOG electrodes)", out, "EOG waveform", "recorded",
+            float(est.n_removed_.mean()), t.dt)
 
-    # 2. The comparator MNE already ships, on the same electrodes.
     with _timed("EOG regression") as t:
         out = EOGRegression(picks=eeg_names,
                             picks_artifact=eog_names).fit(raw).apply(raw.copy())
-    _record("EOG regression", out, "recorded", None, t.dt)
+    _record("EOG regression", out, "EOG waveform", "recorded", None, t.dt)
 
-    # 3. No electrodes at all: the reference is built from the EEG itself.
+    # -- tier 2: only the blink TIMES, never the EOG waveform -----------------
+    # Linear DSS: closed-form GED biased toward blink-locked activity.
+    with _timed("DSS linear (CycleAverageBias)") as t:
+        dss = DSS(bias=CycleAverageBias(blinks[:, 0], window=EOG_DSS_WINDOW_S,
+                                        sfreq=sfreq),
+                  n_select="auto", return_type="raw")
+        out = dss.fit_transform(scalp.copy())
+    k_dss = int(dss.n_selected_ or 1)
+    _record("DSS linear\n(CycleAverageBias)", out, "blink times", "event-locked",
+            float(k_dss), t.dt)
+
+    # Non-linear DSS at the SAME rank: the criterion is re-estimated from the
+    # data each iteration instead of being a fixed covariance.
+    # NB: no beta= here. beta_tanh accelerates convergence but leaves filters_
+    # non-orthogonal, so patterns_ stops being a valid inverse and
+    # inverse_transform silently returns garbage (checked: round-trip relative
+    # error 1.1 with beta, 7e-15 without).
+    data = scalp.get_data()
+    half = int(0.5 * sfreq)
+    nonlinear_runs = []
+    with _timed(f"DSS non-linear (IterativeDSS + tanh, {len(EOG_DSS_SEEDS)} seeds)") as t:
+        for seed in EOG_DSS_SEEDS:
+            idss = IterativeDSS(TanhMaskDenoiser(), n_components=data.shape[0],
+                                random_state=seed)
+            sources = idss.fit_transform(data)
+            segs = np.stack([sources[:, s - half:s + half] for s in blinks[:, 0]
+                             if s - half >= 0 and s + half < sources.shape[1]])
+            # Same information as the linear arm: blink times pick the components.
+            worst_components = np.argsort(np.ptp(segs.mean(0), axis=1))[::-1][:k_dss]
+            kept = sources.copy()
+            kept[worst_components] = 0.0
+            run = mne.io.RawArray(idss.inverse_transform(kept), scalp.info.copy(),
+                                  verbose="ERROR")
+            evk = _blink_evoked(run)
+            nonlinear_runs.append({
+                "seed": seed,
+                "attenuation_pct": 100.0 * (1.0 - float(
+                    np.ptp(evk.data, axis=1).mean()) * 1e6 / base_p2p),
+                "n170_effect_uv": _n170_effect(run),
+                "converged_fraction": float(idss.convergence_info_[:, 1].mean()),
+                "evoked": evk.data,
+            })
+    # The reported arm is the seed closest to the median outcome, and the whole
+    # spread is cached so the figure can show it. Picking the best seed would be
+    # picking a result.
+    effects = np.array([r["n170_effect_uv"] for r in nonlinear_runs])
+    median_run = nonlinear_runs[int(np.argmin(np.abs(effects - np.median(effects))))]
+    log.info("  non-linear DSS across %d seeds: attenuation %.1f%% (sd %.1f), "
+             "N170 %+.3f uV (sd %.3f, range %+.3f to %+.3f)",
+             len(EOG_DSS_SEEDS),
+             float(np.mean([r["attenuation_pct"] for r in nonlinear_runs])),
+             float(np.std([r["attenuation_pct"] for r in nonlinear_runs])),
+             float(effects.mean()), float(effects.std()),
+             float(effects.min()), float(effects.max()))
+    rows.append({
+        "method": "DSS non-linear\n(IterativeDSS + tanh)",
+        "blink_p2p_uv": base_p2p * (1.0 - median_run["attenuation_pct"] / 100.0),
+        "attenuation_pct": median_run["attenuation_pct"],
+        "n170_effect_uv": median_run["n170_effect_uv"],
+        "n170_effect_pct": 100.0 * median_run["n170_effect_uv"] / base_effect,
+        "information": "blink times", "reference_kind": "event-locked",
+        "components_removed": float(k_dss), "runtime_s": t.dt,
+        "seed_spread": {
+            "seeds": list(EOG_DSS_SEEDS),
+            "reported_seed": median_run["seed"],
+            "attenuation_pct": [r["attenuation_pct"] for r in nonlinear_runs],
+            "n170_effect_uv": [r["n170_effect_uv"] for r in nonlinear_runs],
+            "converged_fraction": [r["converged_fraction"] for r in nonlinear_runs],
+        },
+    })
+    traces["DSS non-linear\n(IterativeDSS + tanh)"] = median_run["evoked"]
+    log.info("  %-34s %-14s blink %6.2f uV (%+5.1f%%) | N170 %+.3f uV (seed %d, median)",
+             "DSS non-linear (IterativeDSS + tanh)", "blink times",
+             rows[-1]["blink_p2p_uv"], rows[-1]["attenuation_pct"],
+             rows[-1]["n170_effect_uv"], median_run["seed"])
+
+    # -- tier 3: no external information at all -------------------------------
     for label, lo, hi in EOG_PSEUDO_FILTERS:
         aug, pseudo_names = _attach_pseudo_reference(raw, eeg_names, lo, hi)
         with _timed(label.replace("\n", " ")) as t:
             est = ICanClean(sfreq=sfreq, ref_channels=pseudo_names,
                             primary_channels=eeg_names)
             out = est.fit_transform(aug).pick(eeg_names)
-        _record(label, out, "pseudo", est, t.dt)
+        _record(label, out, "the EEG itself", "pseudo",
+                float(est.n_removed_.mean()), t.dt)
 
-    du.save_npz(du.cache_path("eog_traces.npz"), freqs=freqs, **traces)
+    du.save_npz(du.cache_path("eog_traces.npz"), **traces)
     du.save_json(du.cache_path("eog_metrics.json"), {
         "subject": EOG_SUBJECT,
         "n_eeg": len(eeg_names), "n_reference": len(eog_names),
@@ -1778,9 +1837,8 @@ def prepare_eog(root: Path | None = None) -> None:
         "blinks_per_min": 60.0 * len(blinks) / float(raw.times[-1]),
         "duration_s": float(raw.times[-1]),
         "reference_channels": list(eog_names),
-        "posterior_roi": [eeg_names[i] for i in posterior],
-        "alpha_band_hz": list(EOG_ALPHA_BAND),
-        "flank_bands_hz": [list(b) for b in EOG_FLANK_BANDS],
+        "dss_rank": k_dss,
+        "dss_window_s": list(EOG_DSS_WINDOW_S),
         "baseline_blink_p2p_uv": base_p2p,
         "baseline_n170_effect_uv": base_effect,
         "n170_roi": list(EOG_N170_ROI),
@@ -1821,19 +1879,33 @@ def prepare_eog(root: Path | None = None) -> None:
                 "note": ("both filter settings are reported; neither was chosen "
                          "after seeing an endpoint"),
             },
+            "dss": {
+                "linear": (f"DSS(bias=CycleAverageBias(blink_samples, "
+                           f"window={EOG_DSS_WINDOW_S}), n_select='auto') -- a "
+                           "closed-form GED biased toward blink-locked activity"),
+                "nonlinear": ("IterativeDSS(TanhMaskDenoiser()) at the SAME rank; "
+                              "components are ranked by blink-locked amplitude, so "
+                              "both DSS arms use identical information and differ "
+                              "only in how the criterion is solved"),
+                "beta_warning": ("beta=beta_tanh is NOT used: it accelerates "
+                                 "convergence but leaves filters_ non-orthogonal, "
+                                 "so patterns_ stops being a valid inverse and "
+                                 "inverse_transform silently returns garbage "
+                                 "(round-trip relative error 1.1 with beta, 7e-15 "
+                                 "without)"),
+                "information": ("both DSS arms see only blink TIMES, never the EOG "
+                                "waveform that iCanClean and regression are given"),
+            },
             "endpoints": {
                 "attenuation": ("blink-locked evoked peak-to-peak, averaged over "
                                 "all EEG channels"),
-                "preservation_primary": (
+                "preservation": (
                     f"faces-vs-cars N170 effect at {'/'.join(EOG_N170_ROI)} over "
                     f"{N170_WINDOW[0] * 1000:.0f}-{N170_WINDOW[1] * 1000:.0f} ms. "
                     "Blinks are not condition-locked, so honest removal should "
-                    "leave this alone or sharpen it."),
-                "preservation_secondary": (
-                    "median posterior alpha, flank-normalised against 5-7 and "
-                    "18-25 Hz. Reported because it CANNOT see the pseudo-reference "
-                    "failure -- 8-13 Hz lies outside the band that method damages, "
-                    "which is the point."),
+                    "leave this alone or sharpen it. Chosen because it lies INSIDE "
+                    "the band these methods touch -- a posterior-alpha endpoint "
+                    "sits outside it and cannot see the damage."),
             },
         },
         selection_rule=(

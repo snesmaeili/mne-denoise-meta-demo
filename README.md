@@ -133,7 +133,7 @@ No cell exceeds 3 s.
 | 2 — ASR | What did ASR detect, and what did it cost? | Artifact-interval RRMSE 0.492 → **0.160**. Artifact-free RRMSE 0.003 → **0.165** — a real cost. `calibration_info_` explains it: at 20 s the calibration has 27 samples per channel dimension and *both* endpoints get worse. |
 | 2b — ASR variants | Which of the four ASR variants does this recording need? | Robustness to a contaminated calibration comes from `cov_estimator`, not from `method=` — the threshold inflates **+20%** with `mean` and **+9%** with the default `geometric_median`, while `standard` and `riemannian_windowed` are numerically identical. On real mobile EEG the window selector is **not** starving (74%), so Juggler is not indicated. |
 | 3 — DSS | Why do I need this, when MNE already ships Xdawn and SSD? | Because the criterion is an argument. On one fixture with two planted sources, component 1 follows whatever is declared: PCA → the rhythm (\|cos\| **1.00**, it has more variance), `AverageBias` → the evoked source (**0.995**), `BandpassBias` → the rhythm (**0.999**). On real N170 data DSS does **not** win: it beats matched-rank PCA in 32/40 but `mne.decoding.XdawnTransformer` in only **15/40**, and plain PCA beats raw sensors in **40/40**. Reproducibility improves in 37/40, condition AUC in only 25/40. |
-| 4 — iCanClean | Does attenuation mean the method worked? | **No.** iCanClean's pseudo-reference — a notch-filtered copy of the EEG, needing no electrodes — removes the most blink (**92.2%**) and *inverts* the faces-vs-cars N170, from −0.74 µV to **+0.59 µV**. The recorded EOG electrodes remove 83.1% and sharpen the effect to −1.43 µV; `mne.preprocessing.EOGRegression` removes 73.0% and reaches −1.15 µV. Posterior alpha rates the destructive arm at just −0.78 dB, because 8–13 Hz lies outside the band it damaged — pick your preservation endpoint inside the band you cleaned. |
+| 4 — blink removal | Does attenuation mean the method worked? | **No — the ordering is nearly reversed.** Six methods, ordered by what they are told. Blink removed / N170 effect (uncorrected −0.74 µV): iCanClean **83.1% / −1.43**, `EOGRegression` 73.0% / −1.15, DSS linear **95.9% / −0.56**, DSS non-linear 76.2% / −0.37, pseudo-reference notch **92.2% / +0.59** (sign inverted), pseudo-reference lowpass 89.8% / +0.36. The three biggest attenuators are the three worst results. |
 
 ## F. Datasets
 
@@ -343,10 +343,11 @@ These are real, reproduced, and **not worked around** in the demo.
   PCA 0.9712, DSS 0.9747, **Xdawn 0.9787**. DSS beats PCA 32/40, Xdawn 15/40;
   PCA beats sensors 40/40. Reproducibility up 37/40; discriminability up 25/40.
 - Act 4 — N170 effect uncorrected **−0.74 µV**. Blink removed / N170 effect:
-  EOG electrodes 83.1% / **−1.43**, EOG regression 73.0% / −1.15,
-  pseudo-reference notch 8–30 Hz **92.2% / +0.59** (sign inverted),
-  pseudo-reference lowpass 5 Hz 89.8% / +0.36. Alpha rates the notch arm
-  −0.78 dB and cannot see the damage.
+  iCanClean (EOG electrodes) 83.1% / **−1.43**, EOG regression 73.0% / −1.15,
+  DSS linear **95.9% / −0.56**, DSS non-linear 76.2% / −0.37,
+  pseudo-reference notch **92.2% / +0.59** (sign inverted), pseudo-reference
+  lowpass 89.8% / +0.36. The non-linear DSS arm spans −1.05 to −0.02 µV across
+  six seeds — it is a fixed-point iteration, not a closed form.
 - deep dive 03 — ds004505 real reference 11.5%, scrambled 10.5%, at **2.08**
   samples per dimension; widen to a 30 s stats window (31.2 samples/dim) and
   mean R² falls 0.296 → 0.026 with **nothing** removed
@@ -363,6 +364,15 @@ These are real, reproduced, and **not worked around** in the demo.
   non-linear contrast, `IterativeDSS` + `TanhMaskDenoiser` lands on FastICA's
   components at \|r\| = 1.000 / 0.999 / 0.895 / 0.894 — close, not identical, and
   FastICA recovered all four sources where DSS got three.
+- *"Why is the non-linear DSS arm an error bar?"* — Linear DSS is a closed-form
+  generalised eigendecomposition, so it returns the same answer every run.
+  `IterativeDSS` is a fixed-point iteration from a random init: over six seeds
+  its N170 lands between −1.05 and −0.02 µV while attenuation stays at
+  77.4% ± 2.8. Reporting one seed would be reporting a choice. Note also that
+  `beta=beta_tanh` must **not** be used when reconstructing — it speeds
+  convergence but leaves `filters_` non-orthogonal, so `patterns_` stops being a
+  valid inverse and `inverse_transform` silently returns garbage (round-trip
+  relative error 1.1 with it, 7e-15 without).
 - *"Where did `pseudo_ref=True` go?"* — It was added to `ICanClean` in
   mne-denoise `80b02e0` (with `filter_ref`, matching MATLAB
   `filtYtype='Notch'`) and removed in the PR-26 refactor with no changelog

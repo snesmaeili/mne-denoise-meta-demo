@@ -318,17 +318,13 @@ def test_icanclean_control_panel_plots_every_arm():
     }
     rows = [
         {"method": "uncorrected", "attenuation_pct": 0.0,
-         "n170_effect_uv": -0.74, "alpha_vs_background_db": 0.0,
-         "reference_kind": "none"},
+         "n170_effect_uv": -0.74, "reference_kind": "none"},
         {"method": "iCanClean\n(EOG electrodes)", "attenuation_pct": 83.1,
-         "n170_effect_uv": -1.43, "alpha_vs_background_db": -0.40,
-         "reference_kind": "recorded"},
+         "n170_effect_uv": -1.43, "reference_kind": "recorded"},
         {"method": "EOG regression", "attenuation_pct": 73.0,
-         "n170_effect_uv": -1.15, "alpha_vs_background_db": -1.19,
-         "reference_kind": "recorded"},
+         "n170_effect_uv": -1.15, "reference_kind": "recorded"},
         {"method": "pseudo-reference\n(notch 8-30 Hz)", "attenuation_pct": 92.2,
-         "n170_effect_uv": +0.59, "alpha_vs_background_db": -0.78,
-         "reference_kind": "pseudo"},
+         "n170_effect_uv": +0.59, "reference_kind": "pseudo"},
     ]
     with du.presentation_theme():
         fig = du.plot_icanclean_control_panel(times, traces, rows,
@@ -350,18 +346,42 @@ def test_eog_cache_shows_attenuation_and_science_disagree():
     base = m["baseline_n170_effect_uv"]
     assert base < 0.0, "the N170 effect is negative by definition"
 
-    best = max(rows, key=lambda r: r["attenuation_pct"])
-    assert best["reference_kind"] == "pseudo"
-    # It removes the most artifact and inverts the effect.
-    assert best["n170_effect_uv"] > 0.0
-    # And the alpha endpoint cannot see that, which is the teaching point.
-    assert best["alpha_vs_background_db"] > -1.0
+    # The three biggest attenuators must all be worse on the science than the
+    # arm that wins it -- that anti-correlation IS the act.
+    best_science = min(rows, key=lambda r: r["n170_effect_uv"])
+    assert best_science["method"].startswith("iCanClean")
+    top3 = sorted(rows, key=lambda r: -r["attenuation_pct"])[:3]
+    assert best_science not in top3
+    for r in top3:
+        assert r["n170_effect_uv"] > best_science["n170_effect_uv"]
+
+    # Pseudo-reference removes the most and inverts the sign.
+    top = top3[0]
+    assert top["reference_kind"] == "pseudo" or top["information"] == "blink times"
+    assert any(r["n170_effect_uv"] > 0.0 for r in rows
+               if r["reference_kind"] == "pseudo")
 
     recorded = by["iCanClean\n(EOG electrodes)"]
     assert recorded["n170_effect_uv"] < base, "recorded refs should sharpen it"
     assert recorded["attenuation_pct"] > by["EOG regression"]["attenuation_pct"]
     # A sane operating point is why the recorded-reference arm works at all.
     assert m["samples_per_dimension"] > 10.0
+
+
+def test_nonlinear_dss_reports_its_seed_spread():
+    """An iterative method has no single answer; the cache must admit that."""
+    m = du.load_json(du.cache_path("eog_metrics.json"))
+    row = next(r for r in m["rows"] if "seed_spread" in r)
+    s = row["seed_spread"]
+    assert len(s["seeds"]) >= 3
+    assert len(s["n170_effect_uv"]) == len(s["seeds"])
+    # The reported value must be one of the runs, not a hand-picked number.
+    assert row["n170_effect_uv"] in s["n170_effect_uv"]
+    # And the spread must be wide enough that reporting one seed would mislead.
+    assert max(s["n170_effect_uv"]) - min(s["n170_effect_uv"]) > 0.1
+    # Its linear counterpart is deterministic and carries no spread.
+    linear = next(r for r in m["rows"] if r["method"].startswith("DSS linear"))
+    assert "seed_spread" not in linear
 
 
 def test_movement_cache_records_the_widened_window_rerun():
